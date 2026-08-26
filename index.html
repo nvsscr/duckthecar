@@ -1,0 +1,1703 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#eef0e8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Duck The Car</title>
+<style>
+  :root{ --ui-font: Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif; }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0;padding:0;width:100%;height:100%;
+    background:#eef0e8;overflow:hidden;
+    font-family:var(--ui-font);
+    -webkit-user-select:none;-moz-user-select:none;user-select:none;
+    overscroll-behavior:none;touch-action:none;
+  }
+  #stage{
+    position:absolute;left:50%;top:50%;
+    width:420px;height:700px;
+    transform:translate(-50%,-50%) scale(var(--s,1));
+    transform-origin:50% 50%;
+    display:flex;flex-direction:column;gap:9px;padding:9px;
+  }
+  .panel{
+    border:3px solid #2b3440;border-radius:12px;background:#fff;
+    box-shadow:0 3px 0 rgba(43,52,64,.16);
+    position:relative;
+  }
+  .head{
+    height:72px;background:#79cdf0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  }
+  .head h1{
+    margin:0;font-size:20px;font-weight:700;letter-spacing:2px;color:#fff;
+    /* one solid colour, with a dark outline so it reads off the sky */
+    text-shadow:-2px 0 #16394f,2px 0 #16394f,0 -2px #16394f,0 2px #16394f,
+                -2px -2px #16394f,2px -2px #16394f,-2px 2px #16394f,3px 3px 0 rgba(22,57,79,.4);
+  }
+  .head p{margin:0;font-size:10px;line-height:14px;letter-spacing:1px;color:#12455e;text-align:center;}
+  .game{height:510px;padding:0;overflow:hidden;background:#a4d84a;}
+  #cv{display:block;width:396px;height:504px;border-radius:9px;}
+  .ctrl{
+    height:82px;background:#fffaf0;
+    display:flex;flex-direction:row;align-items:center;justify-content:center;gap:12px;
+  }
+  .chev{width:0;height:0;border-top:9px solid transparent;border-bottom:9px solid transparent;opacity:.4;}
+  .chev.l{border-right:12px solid #2b3440;}
+  .chev.r{border-left:12px solid #2b3440;}
+  #track{
+    position:relative;width:286px;height:28px;
+    border:3px solid #2b3440;border-radius:15px;background:#e8e6d8;
+    box-shadow:inset 0 2px 0 rgba(43,52,64,.10);
+  }
+  #tick{position:absolute;left:50%;top:7px;width:2px;height:14px;margin-left:-1px;background:rgba(43,52,64,.22);}
+  #knob{
+    position:absolute;left:50%;top:50%;width:38px;height:38px;margin:-19px 0 0 -19px;
+    border:3px solid #2b3440;border-radius:50%;background:#4a8fe0;
+    box-shadow:inset 0 -4px 0 rgba(0,0,0,.18);
+    transform:translateX(0);
+  }
+  #knob::after{
+    content:"";position:absolute;left:50%;top:50%;
+    width:15px;height:5px;margin:-2.5px 0 0 -7.5px;
+    background:#ffd233;border-radius:3px;
+  }
+  /* name box - only shown once a world leaderboard is switched on */
+  #nameWrap{position:absolute;left:9px;top:7px;display:none;align-items:center;}
+  #nameIn{
+    width:120px;padding:2px 5px;
+    border:2px solid #16394f;border-radius:5px;background:rgba(255,255,255,.75);
+    font-family:var(--ui-font);font-size:11px;font-weight:700;
+    letter-spacing:1px;color:#12455e;text-transform:uppercase;outline:none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="panel head">
+    <h1>DUCK THE CAR</h1>
+    <p>Steer the duck<br>don't get hit</p>
+    <div id="nameWrap"><input id="nameIn" maxlength="12" spellcheck="false" autocomplete="off"></div>
+  </div>
+  <div class="panel game"><canvas id="cv"></canvas></div>
+  <div class="panel ctrl">
+    <div class="chev l"></div>
+    <div id="track"><div id="tick"></div><div id="knob"></div></div>
+    <div class="chev r"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+'use strict';
+
+/* ============================================================
+   WORLD LEADERBOARD
+   Leave empty and the game is fully offline: local best score only,
+   no network, no name box. Paste your deployed worker URL here to
+   switch on world scores (see LEADERBOARD.md).
+   ============================================================ */
+const LEADERBOARD_URL = '';        // e.g. 'https://duckthecar.<you>.workers.dev'
+
+/* ============================================================
+   CONSTANTS
+   ============================================================ */
+const W = 396;
+const H = 504;
+const CAM_ANCHOR = 0.60;
+const LANE_H  = 44;
+const GRASS_H = 48;
+const EDGE    = 15;
+const DUCK_W  = 25, DUCK_H = 24;
+const HITBOX  = 0.70;
+const DK_SCALE = 0.58;
+const DK_HW = 4.2, DK_HH = 4.1;    // duckling hitbox half extents - deliberately tiny
+const DK_SLOT_K  = 3.2;
+const FAMILY_DUR = 0.75;
+const ROW_GAP_ROAD = 12, ROW_GAP_GRASS = 20;   // flock spacing
+const COL_GAP_ROAD = 13, COL_GAP_GRASS = 16;
+const BABY_CAR_H = 0.55, BABY_CAR_W = 0.92;
+const MAX_DUCKLINGS = 8;
+/* Steering is POSITIONAL, not velocity based. No acceleration, no drift. */
+const KEY_SPEED  = 320;
+const SNAP_SPEED = 520;
+const SNAP_K     = 22;
+const FWD_BASE = 78, FWD_MAX = 96;
+const GEN_AHEAD  = 340;
+const CULL_BELOW = 150;
+const ACT_UP = 430, ACT_DOWN = 130;
+const KNOB_TRAVEL = 122;
+const BEST_KEY = 'duckTheCar.best';
+const NAME_KEY = 'duckTheCar.name';
+const TAU = Math.PI * 2;
+
+const C = {
+  grass:'#a4d84a', grassAlt:'#99cf3f', grassLit:'#bbe870', grassEdge:'#6fa32c',
+  road:'#7c8794',  roadAlt:'#74808d',  curb:'#59636f', edge:'rgba(52,58,44,0.32)',
+  dash:'#fdf8e7',  centre:'#ffd83d',
+  duck:'#ffd233',  duckWing:'#f0a41f', beak:'#ff8b2a', foot:'#ff8b2a',
+  line:'#4a3a10',  shade:'rgba(40,44,30,0.18)', carShade:'rgba(38,42,28,0.22)',
+  ink:'#2b3440',   paper:'#fffaf0', accent:'#ff5a4d', gold:'#ffc93c', blue:'#4a8fe0'
+};
+/* the traffic is where most of the colour lives now */
+const CAR_COLORS = ['#e8564a','#4a8fe0','#58bb56','#9a6ad6','#f0902a',
+                    '#f5f2e6','#3fbfae','#e05a9a','#f5d13b','#ff7a5c'];
+const FLOWERS = ['#ffffff','#ffe14d','#ff7fb0','#b98cff','#ff9b3d','#7fe6ff'];
+/* one font for the whole game, so it only has to change in one place */
+const FONT = 'Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif';
+const TYPES = {
+  car:   {w:42, h:24},
+  sedan: {w:54, h:25},
+  van:   {w:68, h:27},
+  truck: {w:92, h:28}
+};
+
+/* ============================================================
+   SMALL HELPERS
+   ============================================================ */
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+const railToX = r => W / 2 + clamp(r, -1, 1) * (W / 2 - EDGE);
+const lerp  = (a,b,t) => a + (b-a) * t;
+const rand  = (a,b) => a + Math.random() * (b-a);
+const randInt = (a,b) => Math.floor(rand(a, b+1));
+const pick  = arr => arr[(Math.random()*arr.length)|0];
+
+/* ============================================================
+   CANVAS
+   ============================================================ */
+const stage = document.getElementById('stage');
+const cv    = document.getElementById('cv');
+const ctx   = cv.getContext('2d');
+const track = document.getElementById('track');
+const knob  = document.getElementById('knob');
+let viewScaleX = 1, viewScaleY = 1;
+
+function resize() {
+  const vw = Math.max(200, window.innerWidth || 420);
+  const vh = Math.max(320, window.innerHeight || 700);
+  const s = Math.max(0.25, Math.min((vw - 4) / 420, (vh - 4) / 700, 1.35));
+  stage.style.setProperty('--s', s);
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const px = Math.max(1, Math.round(W * s * dpr));
+  const py = Math.max(1, Math.round(H * s * dpr));
+  if (cv.width !== px || cv.height !== py) { cv.width = px; cv.height = py; }
+  viewScaleX = px / W; viewScaleY = py / H;
+  ctx.setTransform(viewScaleX, 0, 0, viewScaleY, 0, 0);
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+function rr(x, y, w, h, r) {
+  const rad = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+rad, y);
+  ctx.lineTo(x+w-rad, y);   ctx.arcTo(x+w, y, x+w, y+rad, rad);
+  ctx.lineTo(x+w, y+h-rad); ctx.arcTo(x+w, y+h, x+w-rad, y+h, rad);
+  ctx.lineTo(x+rad, y+h);   ctx.arcTo(x, y+h, x, y+h-rad, rad);
+  ctx.lineTo(x, y+rad);     ctx.arcTo(x, y, x+rad, y, rad);
+  ctx.closePath();
+}
+function dot(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+function setFont(px, weight) { ctx.font = (weight || 700) + ' ' + px + 'px ' + FONT; }
+
+/* letter-spaced text, drawn per character so it works everywhere */
+function textLS(txt, x, y, ls, align, strokeW, strokeCol) {
+  txt = String(txt);
+  let total = 0;
+  for (const ch of txt) total += ctx.measureText(ch).width + ls;
+  total -= ls;
+  let cx = align === 'center' ? x - total/2 : align === 'right' ? x - total : x;
+  const prevAlign = ctx.textAlign;
+  ctx.textAlign = 'left';
+  if (strokeW) {
+    ctx.save();
+    ctx.lineWidth = strokeW; ctx.strokeStyle = strokeCol; ctx.lineJoin = 'round';
+    let sx = cx;
+    for (const ch of txt) { ctx.strokeText(ch, sx, y); sx += ctx.measureText(ch).width + ls; }
+    ctx.restore();
+  }
+  for (const ch of txt) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + ls; }
+  ctx.textAlign = prevAlign;
+  return total;
+}
+function textWidth(txt, ls) {
+  let total = 0;
+  for (const ch of String(txt)) total += ctx.measureText(ch).width + ls;
+  return total - ls;
+}
+
+/* ============================================================
+   AUDIO
+   ============================================================ */
+const Sfx = {
+  ac: null, master: null, muted: false,
+  init() {
+    if (this.ac) { if (this.ac.state === 'suspended') this.ac.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      this.ac = new AC();
+      this.master = this.ac.createGain();
+      this.master.gain.value = 0.5;
+      this.master.connect(this.ac.destination);
+    } catch (e) { this.ac = null; }
+  },
+  tone(f1, f2, dur, type, vol, delay) {
+    if (!this.ac || this.muted) return;
+    const t0 = this.ac.currentTime + (delay || 0);
+    const o = this.ac.createOscillator();
+    const g = this.ac.createGain();
+    o.type = type || 'sine';
+    o.frequency.setValueAtTime(f1, t0);
+    if (f2 && f2 !== f1) o.frequency.exponentialRampToValueAtTime(Math.max(20, f2), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t0); o.stop(t0 + dur + 0.03);
+  },
+  noise(dur, vol, freq, sweep) {
+    if (!this.ac || this.muted) return;
+    const t0 = this.ac.currentTime;
+    const n = Math.floor(this.ac.sampleRate * dur);
+    const buf = this.ac.createBuffer(1, n, this.ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random()*2-1) * (1 - i/n);
+    const src = this.ac.createBufferSource(); src.buffer = buf;
+    const f = this.ac.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.setValueAtTime(freq, t0);
+    if (sweep) f.frequency.exponentialRampToValueAtTime(Math.max(60, sweep), t0 + dur);
+    const g = this.ac.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t0); src.stop(t0 + dur + 0.02);
+  },
+  cross()   { this.tone(620, 660, 0.09, 'sine', 0.05, 0);
+              this.tone(930, 990, 0.11, 'sine', 0.045, 0.06); },
+  whoosh(v) { this.noise(0.16, v || 0.028, 2000, 240); },
+  near()    { this.whoosh(0.05); this.tone(350, 235, 0.09, 'triangle', 0.02, 0); },
+  peep()    { this.tone(1480, 1720, 0.045, 'triangle', 0.017, 0); },
+  chick()   { this.tone(720, 760, 0.06, 'triangle', 0.05, 0);
+              this.tone(960, 1000, 0.06, 'triangle', 0.05, 0.055);
+              this.tone(1240, 1300, 0.09, 'triangle', 0.045, 0.11); },
+  babyHit() { this.noise(0.09, 0.07, 1200, 300);
+              this.tone(880, 400, 0.20, 'triangle', 0.05, 0.03);
+              this.tone(600, 300, 0.16, 'sine', 0.028, 0.07); },
+  crash()   { this.noise(0.22, 0.16, 900, 120);
+              this.tone(150, 52, 0.28, 'square', 0.07, 0); },
+  record()  { this.tone(760, 800, 0.09, 'triangle', 0.05, 0);
+              this.tone(1010, 1060, 0.09, 'triangle', 0.05, 0.07);
+              this.tone(1520, 1590, 0.17, 'triangle', 0.045, 0.14); }
+};
+
+/* ============================================================
+   ENTITIES
+   ============================================================ */
+let vehSeq = 0;
+class Vehicle {
+  constructor(type, x, dir, color) {
+    const t = TYPES[type];
+    this.type = type; this.w = t.w; this.h = t.h;
+    this.x = x; this.dir = dir; this.color = color;
+    this.id = ++vehSeq;
+    this.near = false;
+  }
+}
+
+class Lane {
+  constructor(top, dir, speed, d, sparse) {
+    this.top = top;
+    this.cy = top + LANE_H / 2;
+    this.dir = dir;
+    this.speed = speed;
+    this.gapMin = d.gapMin; this.gapMax = d.gapMax;
+    this.bigChance = d.bigChance;
+    this.speedNorm = d.speedMax > d.speedMin
+      ? clamp((speed - d.speedMin) / (d.speedMax - d.speedMin), 0, 1) : 0.5;
+    this.sparse = sparse ? 1.75 : 1;
+    this.vehicles = [];
+    this.nextGap = this.rollGap();
+    this.prefill();
+  }
+  rollGap() {
+    const base = clamp(this.speed * 1.75, this.gapMin, this.gapMax);
+    return base * (0.95 + Math.random() * 0.8) * this.sparse;
+  }
+  /* Big vehicles are never the quick ones: fast lanes carry only small cars,
+     trucks are reserved for slow lanes so they read from far away. */
+  makeType() {
+    const f = this.speedNorm;
+    if (f > 0.66) return Math.random() < 0.62 ? 'car' : 'sedan';
+    if (Math.random() < this.bigChance * (f < 0.40 ? 1.6 : 1)) {
+      return (f < 0.40 && Math.random() < 0.55) ? 'truck' : 'van';
+    }
+    return Math.random() < 0.5 ? 'car' : 'sedan';
+  }
+  colorFor(type) {
+    if (type === 'truck') return Math.random() < 0.6 ? '#f5f2e6' : '#f5d13b';
+    return pick(CAR_COLORS);
+  }
+  prefill() {
+    let edge = this.dir > 0 ? -10 + rand(0, this.nextGap) : W + 10 - rand(0, this.nextGap);
+    let guard = 0;
+    while (guard++ < 24) {
+      const type = this.makeType();
+      const t = TYPES[type];
+      let x;
+      if (this.dir > 0) { x = edge + t.w/2; edge = x + t.w/2 + this.rollGap(); if (x - t.w/2 > W + 70) break; }
+      else              { x = edge - t.w/2; edge = x - t.w/2 - this.rollGap(); if (x + t.w/2 < -70) break; }
+      this.vehicles.push(new Vehicle(type, x, this.dir, this.colorFor(type)));
+    }
+    this.nextGap = this.rollGap();
+  }
+  trySpawn() {
+    let gapAvail;
+    if (this.vehicles.length === 0) gapAvail = Infinity;
+    else if (this.dir > 0) {
+      let minL = Infinity;
+      for (const v of this.vehicles) minL = Math.min(minL, v.x - v.w/2);
+      gapAvail = minL + 10;
+    } else {
+      let maxR = -Infinity;
+      for (const v of this.vehicles) maxR = Math.max(maxR, v.x + v.w/2);
+      gapAvail = (W - maxR) + 10;
+    }
+    if (gapAvail < this.nextGap) return;
+    const type = this.makeType();
+    const t = TYPES[type];
+    const x = this.dir > 0 ? -t.w/2 - 10 : W + t.w/2 + 10;
+    this.vehicles.push(new Vehicle(type, x, this.dir, this.colorFor(type)));
+    this.nextGap = this.rollGap();
+  }
+  update(dt) {
+    const vs = this.vehicles;
+    for (let i = vs.length - 1; i >= 0; i--) {
+      const v = vs[i];
+      v.x += this.speed * this.dir * dt;
+      const gone = this.dir > 0 ? (v.x - v.w/2 > W + 70) : (v.x + v.w/2 < -70);
+      if (gone) vs.splice(i, 1);
+    }
+    this.trySpawn();
+  }
+}
+
+class Section {
+  constructor(kind, top, height) {
+    this.kind = kind;
+    this.top = top;
+    this.h = height;
+    this.bottom = top + height;
+    this.lanes = [];
+    this.details = [];
+    this.duckling = null;
+    this.scored = false;
+  }
+}
+
+class Duckling {
+  constructor(x, y) {
+    this.x = x || 0; this.y = y || 0;
+    this.slot = 1;
+    this.phase = Math.random() * TAU;
+    this.bobRate = 6.1 + Math.random() * 1.2;
+    this.follow = 9 + Math.random() * 4;    // its own eagerness, so they never move in lockstep
+    this.wob = Math.random() * TAU;
+    this.tilt = 0;
+    this.hop = 0;
+    this.hopWait = rand(0.6, 1.8);
+    this.dangerT = 0;
+    this.dangerCd = 0;
+    this.lastScare = 0;
+    this.greeted = false;
+  }
+}
+
+class KnockedDuckling {
+  constructor(x, y, dir) {
+    this.x = x; this.y = y;
+    this.vx = dir * rand(170, 260);
+    this.vy = rand(25, 80);
+    this.angle = 0;
+    this.spin = dir * rand(13, 19);
+    this.t = 0;
+    this.life = rand(0.42, 0.58);
+    this.phase = Math.random() * TAU;
+    this.puff = 0.08;
+  }
+  update(dt) {
+    this.t += dt;
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.vx *= (1 - Math.min(0.9, 1.1 * dt));
+    this.vy *= (1 - Math.min(0.9, 1.7 * dt));
+    this.angle += this.spin * dt;
+  }
+  get dead() { return this.t >= this.life; }
+  get alpha() {
+    const k = this.t / this.life;
+    return k < 0.62 ? 1 : Math.max(0, 1 - (k - 0.62) / 0.38);
+  }
+}
+
+class Particle {
+  constructor(x, y, vx, vy, life, size, color, kind) {
+    this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+    this.life = life; this.t = 0; this.size = size; this.color = color;
+    this.kind = kind || 'dust';
+    this.rot = Math.random() * TAU;
+    this.spin = rand(-7, 7);
+  }
+  update(dt) {
+    this.t += dt;
+    this.x += this.vx * dt; this.y += this.vy * dt;
+    const drag = 1 - Math.min(0.9, 2.6 * dt);
+    this.vx *= drag; this.vy *= drag;
+    this.rot += this.spin * dt;
+  }
+  get dead() { return this.t >= this.life; }
+}
+
+class Duck {
+  constructor(x, y) {
+    this.x = x; this.y = y;
+    this.vx = 0;
+    this.phase = 0;
+    this.tilt = 0;
+    this.angle = 0;
+    this.spin = 0;
+    this.knockY = 0;
+  }
+  get hw() { return DUCK_W * HITBOX / 2; }
+  get hh() { return DUCK_H * HITBOX / 2; }
+  move(dt, cmd) {
+    const prev = this.x;
+    if (cmd.mode === 'pos') {
+      const diff = cmd.x - this.x;
+      let step = clamp(diff * SNAP_K, -SNAP_SPEED, SNAP_SPEED) * dt;
+      if (Math.abs(step) > Math.abs(diff)) step = diff;
+      this.x += step;
+    } else if (cmd.mode === 'dir') {
+      this.x += cmd.dir * KEY_SPEED * dt;
+    }
+    this.x = clamp(this.x, EDGE, W - EDGE);
+    this.vx = dt > 0 ? (this.x - prev) / dt : 0;
+    this.tilt += ((this.vx / SNAP_SPEED) * 0.30 - this.tilt) * Math.min(1, 16 * dt);
+  }
+  get railPos() { return (this.x - W / 2) / (W / 2 - EDGE); }
+  waddle(dt, moving) {
+    const rate = moving ? (5.2 + Math.abs(this.vx) / 70) : 2.4;
+    this.phase += dt * rate;
+  }
+}
+
+/* ============================================================
+   WORLD
+   ============================================================ */
+class World {
+  constructor(startY) {
+    this.sections = [];
+    this.roadsMade = 0;
+    this.nextDucklingAt = 4 + randInt(0, 1);
+    this.liveDucklings = 0;
+    const first = new Section('grass', startY - 168, 448);
+    this.decorate(first);
+    this.sections.push(first);
+    this.frontier = first.top;
+  }
+
+  difficulty() {
+    const n = Math.max(0, this.roadsMade - 4);
+    const t  = clamp(n / 34, 0, 1);
+    const t2 = clamp((n - 30) / 40, 0, 1);
+    return {
+      lanesMin: n < 8 ? 2 : 3,
+      lanesMax: n < 8 ? 3 : (n < 18 ? 4 : 5),
+      speedMin: lerp(46, 68, t) + 5 * t2,
+      speedMax: Math.min(130, lerp(80, 116, t) + 12 * t2),
+      gapMin:   Math.max(158, lerp(226, 178, t) - 8 * t2),
+      gapMax:   Math.max(232, lerp(376, 292, t) - 16 * t2),
+      bigChance: n < 6 ? 0.10 : (n < 16 ? 0.26 : 0.38),
+      doubleGrass: n < 5 ? 0.5 : (n < 15 ? 0.28 : 0.15)
+    };
+  }
+
+  decorate(sec) {
+    const n = Math.round(sec.h / 9);          // plenty of colour in the grass
+    for (let i = 0; i < n; i++) {
+      const r = Math.random();
+      sec.details.push({
+        x: rand(6, W - 6),
+        y: rand(4, sec.h - 4),
+        t: r < 0.44 ? 'blade' : (r < 0.90 ? 'flower' : 'rock'),
+        c: r < 0.44 ? C.grassLit : (r < 0.90 ? pick(FLOWERS) : '#b9bcae'),
+        s: rand(2.0, 3.4),
+        a: rand(-0.5, 0.5)
+      });
+    }
+  }
+
+  generateAbove() {
+    const prev = this.sections[this.sections.length - 1];
+    const d = this.difficulty();
+    let sec;
+    if (prev.kind === 'road') {
+      const tall = Math.random() < d.doubleGrass;
+      sec = new Section('grass', this.frontier - (tall ? GRASS_H * 2 : GRASS_H), tall ? GRASS_H * 2 : GRASS_H);
+      this.decorate(sec);
+      if (this.roadsMade >= this.nextDucklingAt) {
+        let waiting = 0;
+        for (const s of this.sections) if (s.duckling) waiting++;
+        if (this.liveDucklings + waiting >= MAX_DUCKLINGS) {
+          this.nextDucklingAt = this.roadsMade + 2;
+        } else {
+          this.nextDucklingAt = this.roadsMade + 4 + randInt(0, 2);
+          sec.duckling = new Duckling(rand(52, W - 52), sec.top + sec.h / 2);
+        }
+      }
+    } else {
+      const lanes = randInt(d.lanesMin, d.lanesMax);
+      sec = new Section('road', this.frontier - lanes * LANE_H, lanes * LANE_H);
+      const sparse = {};
+      if (lanes >= 3) sparse[randInt(0, lanes - 1)] = true;
+      if (lanes >= 5) sparse[randInt(0, lanes - 1)] = true;
+      let dir = Math.random() < 0.5 ? 1 : -1;
+      for (let i = 0; i < lanes; i++) {
+        const speed = rand(d.speedMin, d.speedMax);
+        sec.lanes.push(new Lane(sec.top + i * LANE_H, dir, speed, d, !!sparse[i]));
+        dir = Math.random() < 0.78 ? -dir : dir;
+      }
+      this.roadsMade++;
+    }
+    this.sections.push(sec);
+    this.frontier = sec.top;
+  }
+
+  ensure(cam, liveDucklings) {
+    this.liveDucklings = liveDucklings || 0;
+    let guard = 0;
+    while (this.frontier > cam - GEN_AHEAD && guard++ < 40) this.generateAbove();
+    while (this.sections.length > 1 && this.sections[0].top > cam + H + CULL_BELOW) this.sections.shift();
+  }
+
+  update(dt, cam) {
+    const lo = cam - ACT_UP, hi = cam + H + ACT_DOWN;
+    for (const s of this.sections) {
+      if (s.kind !== 'road') continue;
+      if (s.bottom < lo || s.top > hi) continue;
+      for (const ln of s.lanes) ln.update(dt);
+    }
+  }
+
+  kindAt(y) {
+    for (const s of this.sections) if (y >= s.top && y < s.bottom) return s.kind;
+    return 'grass';
+  }
+}
+
+/* ============================================================
+   DRAWING
+   ============================================================ */
+function drawSection(s, cam) {
+  const y = s.top - cam;
+  if (y > H || y + s.h < 0) return;
+  if (s.kind === 'grass') {
+    ctx.fillStyle = C.grass;
+    ctx.fillRect(0, y, W, s.h);
+    ctx.fillStyle = C.grassAlt;
+    for (let by = 0; by < s.h; by += 16) ctx.fillRect(0, y + by, W, 8);
+    for (const d of s.details) {
+      const dy = y + d.y;
+      if (dy < -6 || dy > H + 6) continue;
+      if (d.t === 'blade') {
+        ctx.save(); ctx.translate(d.x, dy); ctx.rotate(d.a);
+        ctx.fillStyle = d.c;
+        ctx.fillRect(-0.8, -d.s, 1.6, d.s * 2);
+        ctx.restore();
+      } else if (d.t === 'flower') {
+        ctx.fillStyle = 'rgba(110,140,60,0.45)';
+        ctx.fillRect(d.x - 0.5, dy, 1, d.s + 2);
+        ctx.fillStyle = d.c;
+        dot(d.x, dy, d.s * 0.9);
+        ctx.fillStyle = 'rgba(255,255,255,0.55)';
+        dot(d.x - d.s * 0.25, dy - d.s * 0.25, d.s * 0.3);
+      } else {
+        ctx.fillStyle = d.c;
+        rr(d.x - d.s, dy - d.s * 0.7, d.s * 2, d.s * 1.4, 1.2); ctx.fill();
+      }
+    }
+  } else {
+    ctx.fillStyle = C.road;
+    ctx.fillRect(0, y, W, s.h);
+    ctx.fillStyle = C.roadAlt;
+    ctx.fillRect(0, y + 7, W, s.h - 14);
+    ctx.fillStyle = C.curb;
+    ctx.fillRect(0, y, W, 4);
+    ctx.fillRect(0, y + s.h - 4, W, 4);
+    ctx.fillStyle = C.edge;
+    ctx.fillRect(0, y - 1, W, 2);
+    ctx.fillRect(0, y + s.h - 1, W, 2);
+    // yellow between opposing streams, white dashes between same-way lanes
+    for (let i = 1; i < s.lanes.length; i++) {
+      const ly = y + i * LANE_H - 1.5;
+      if (ly < -6 || ly > H + 6) continue;
+      const opposing = s.lanes[i].dir !== s.lanes[i - 1].dir;
+      ctx.fillStyle = opposing ? C.centre : C.dash;
+      if (opposing) {
+        ctx.fillRect(0, ly, W, 3);
+      } else {
+        for (let x = 10; x < W - 10; x += 34) ctx.fillRect(x, ly, 18, 3);
+      }
+    }
+  }
+}
+
+function drawVehicle(v, sy) {
+  const w = v.w, h = v.h, hw = w/2, hh = h/2;
+  if (v.x + hw < -70 || v.x - hw > W + 70) return;
+  ctx.save();
+  ctx.translate(v.x, sy);
+  ctx.fillStyle = C.carShade;
+  rr(-hw + 2, -hh + 4.5, w, h, 6); ctx.fill();
+  ctx.scale(v.dir, 1);
+
+  ctx.fillStyle = '#3a3d42';
+  const wx = hw - 12;
+  rr(-wx - 5, -hh - 2, 11, 5, 2); ctx.fill();
+  rr( wx - 6, -hh - 2, 11, 5, 2); ctx.fill();
+  rr(-wx - 5,  hh - 3, 11, 5, 2); ctx.fill();
+  rr( wx - 6,  hh - 3, 11, 5, 2); ctx.fill();
+
+  ctx.fillStyle = v.color;
+  ctx.strokeStyle = 'rgba(40,42,36,0.55)';
+  ctx.lineWidth = 1.4;
+  rr(-hw, -hh, w, h, 5); ctx.fill(); ctx.stroke();
+
+  if (v.type === 'truck') {
+    ctx.fillStyle = '#f2eee0';
+    rr(-hw + 2, -hh + 2, w - 30, h - 4, 4); ctx.fill();
+    ctx.strokeStyle = 'rgba(44,46,40,0.3)'; ctx.lineWidth = 1.1; ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.10)';
+    rr(hw - 26, -hh + 3, 16, h - 6, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(196,236,250,0.95)';
+    rr(hw - 11, -hh + 4.5, 5, h - 9, 2); ctx.fill();
+  } else {
+    const roofIn = v.type === 'van' ? 10 : 13;
+    ctx.fillStyle = 'rgba(0,0,0,0.13)';
+    rr(-hw + roofIn, -hh + 4.5, w - roofIn * 2, h - 9, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(196,236,250,0.95)';
+    rr(hw - roofIn - 3.5, -hh + 5.5, 4, h - 11, 1.6); ctx.fill();
+    rr(-hw + roofIn - 0.5, -hh + 5.5, 4, h - 11, 1.6); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,246,190,0.95)';
+  rr(hw - 4, -hh + 4, 3, 5, 1); ctx.fill();
+  rr(hw - 4,  hh - 9, 3, 5, 1); ctx.fill();
+  ctx.fillStyle = 'rgba(230,70,60,0.9)';
+  rr(-hw + 1, -hh + 4, 3, 5, 1); ctx.fill();
+  rr(-hw + 1,  hh - 9, 3, 5, 1); ctx.fill();
+  ctx.restore();
+}
+
+function drawDuck(x, y, angle, phase, scale, alpha) {
+  const s = scale || 1;
+  ctx.save();
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ctx.translate(x, y);
+  ctx.fillStyle = C.shade;
+  ctx.beginPath(); ctx.ellipse(0, 8 * s, 10.5 * s, 4 * s, 0, 0, TAU); ctx.fill();
+  ctx.rotate(angle || 0);
+  ctx.scale(s, s);
+
+  const step = Math.sin(phase);
+  const bob  = Math.sin(phase * 2) * 0.8;
+  ctx.strokeStyle = C.line;
+  ctx.lineWidth = 1.2;
+
+  ctx.fillStyle = C.foot;
+  ctx.beginPath();
+  ctx.moveTo(-6.6, 6 + step * 1.6); ctx.lineTo(-2.2, 6 + step * 1.6); ctx.lineTo(-4.4, 9.6 + step * 1.6);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(2.2, 6 - step * 1.6); ctx.lineTo(6.6, 6 - step * 1.6); ctx.lineTo(4.4, 9.6 - step * 1.6);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  ctx.translate(0, bob);
+
+  ctx.fillStyle = C.duck;
+  ctx.beginPath(); ctx.ellipse(0, 1.5, 9.6, 9, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.duckWing;
+  ctx.beginPath(); ctx.ellipse(-7.6, 1.8, 3.4, 6, -0.26 + step * 0.14, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse( 7.6, 1.8, 3.4, 6,  0.26 - step * 0.14, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.duckWing;
+  ctx.beginPath(); ctx.ellipse(0, 9.6, 2.6, 1.7, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.duck;
+  ctx.beginPath(); ctx.arc(0, -6.8, 6.3, 0, TAU); ctx.fill(); ctx.stroke();
+  // wide flat bill so it reads as a duck, not a pointy hat
+  ctx.fillStyle = C.beak;
+  ctx.beginPath();
+  ctx.moveTo(-3.8, -12.2);
+  ctx.quadraticCurveTo(-4.1, -16.2, 0, -16.2);
+  ctx.quadraticCurveTo(4.1, -16.2, 3.8, -12.2);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#2b2b2b';
+  dot(-3.4, -7.6, 1.3);
+  dot( 3.4, -7.6, 1.3);
+  ctx.restore();
+}
+
+function drawParticle(p, cam) {
+  const y = p.y - cam;
+  if (y < -30 || y > H + 30) return;
+  const k = 1 - p.t / p.life;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, k);
+  if (p.kind === 'ring') {
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 3 * k + 0.5;
+    ctx.beginPath();
+    ctx.arc(p.x, y, p.size * (1 + (1 - k) * 3.2), 0, TAU);
+    ctx.stroke();
+  } else if (p.kind === 'feather') {
+    ctx.translate(p.x, y); ctx.rotate(p.rot);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.ellipse(0, 0, p.size * 1.5, p.size * 0.7, 0, 0, TAU); ctx.fill();
+  } else {
+    ctx.fillStyle = p.color;
+    dot(p.x, y, p.size * (0.4 + k * 0.6));
+  }
+  ctx.restore();
+}
+
+/* the tiny "!" a baby throws when a car sweeps past it */
+function drawBang(x, y, k) {
+  const pop = 1 + (1 - Math.min(1, k * 1.4)) * 0.5;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, k * 2.4);
+  ctx.translate(x, y);
+  ctx.scale(pop, pop);
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  rr(-2.6, -8.4, 5.2, 7.4, 2.2); ctx.fill();
+  dot(0, 3.1, 2.5);
+  ctx.fillStyle = C.accent;
+  rr(-1.5, -7.4, 3, 5.6, 1.4); ctx.fill();
+  dot(0, 3.1, 1.5);
+  ctx.restore();
+}
+
+function drawSpeaker(x, y, muted) {
+  ctx.save();
+  ctx.globalAlpha = 0.34;
+  ctx.fillStyle = C.ink; ctx.strokeStyle = C.ink; ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(x - 5, y - 2.5); ctx.lineTo(x - 2, y - 2.5); ctx.lineTo(x + 1.5, y - 6);
+  ctx.lineTo(x + 1.5, y + 6); ctx.lineTo(x - 2, y + 2.5); ctx.lineTo(x - 5, y + 2.5);
+  ctx.closePath(); ctx.fill();
+  if (muted) {
+    ctx.beginPath(); ctx.moveTo(x + 3.5, y - 4); ctx.lineTo(x + 9, y + 4); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(x + 3, y, 4, -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + 3, y, 7, -0.8, 0.8); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawChevron(x, y, dir, size, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = C.ink;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x - dir * size * 0.5, y - size);
+  ctx.lineTo(x + dir * size * 0.5, y);
+  ctx.lineTo(x - dir * size * 0.5, y + size);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ============================================================
+   WORLD LEADERBOARD CLIENT
+   ============================================================ */
+const Board = {
+  on: !!LEADERBOARD_URL,
+  top: null, rank: null, name: '', busy: false,
+  load() {
+    if (!this.on) return;
+    fetch(LEADERBOARD_URL + '/top', { method: 'GET' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d && Array.isArray(d.top)) this.top = d.top.slice(0, 5); })
+      .catch(() => {});
+  },
+  submit(score, seconds) {
+    if (!this.on || this.busy || !(score > 0)) return;
+    this.busy = true;
+    fetch(LEADERBOARD_URL + '/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: this.name || 'DUCK', score: score, seconds: Math.round(seconds) })
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        this.busy = false;
+        if (!d) return;
+        if (Array.isArray(d.top)) this.top = d.top.slice(0, 5);
+        if (typeof d.rank === 'number') this.rank = d.rank;
+      })
+      .catch(() => { this.busy = false; });
+  }
+};
+
+/* ============================================================
+   GAME
+   ============================================================ */
+class Game {
+  constructor() {
+    this.best = 0;
+    try { this.best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) {}
+    this.state = 'title';
+    this.reset(true);
+    this.keys = { left: false, right: false };
+    this.dragActive = false; this.dragX = 0; this.dragGrab = 0;
+    this.knobActive = false; this.knobVal = 0; this.knobShown = 0;
+  }
+
+  reset(firstTime) {
+    this.score = 0;
+    this.time = 0;
+    this.runTime = 0;
+    this.duck = new Duck(W / 2, 0);
+    this.cam = this.duck.y - H * CAM_ANCHOR;
+    this.world = new World(this.duck.y);
+    this.world.ensure(this.cam, 0);
+    this.ducklings = [];
+    this.knocked = [];
+    this.popups = [];
+    this.rescued = 0;
+    this.lost = 0;
+    this.particles = [];
+    this.shake = 0;
+    this.freeze = 0;
+    this.deadT = 0;
+    this.overlay = firstTime ? 1 : 0;
+    this.pop = 0;
+    this.nearT = 0;
+    this.nearText = 0;
+    this.nearCool = 0;
+    this.dkPop = 0;
+    this.dkHurt = 0;
+    this.peepCool = 0;
+    this.familyT = 0;
+    this.formation = 0;
+    this.camPush = 0;
+    this.recordT = 0;
+    this.beatBest = false;
+    this.lastKind = 'grass';
+    this.newBest = false;
+    this.sent = false;
+  }
+
+  start() {
+    if (this.state !== 'title') return;
+    this.state = 'playing';
+    this.overlay = 0;
+  }
+  restart() {
+    this.reset(false);
+    this.state = 'playing';
+  }
+  get canRestart() { return this.state === 'over' && this.deadT > 0.42; }
+
+  command() {
+    if (this.keys.left && !this.keys.right) return { mode: 'dir', dir: -1 };
+    if (this.keys.right && !this.keys.left) return { mode: 'dir', dir: 1 };
+    if (this.knobActive) return { mode: 'pos', x: railToX(this.knobVal) };
+    if (this.dragActive) return { mode: 'pos', x: clamp(this.dragX + this.dragGrab, EDGE, W - EDGE) };
+    return { mode: 'none' };
+  }
+
+  /* ---------- update ---------- */
+  update(dt) {
+    this.time += dt;
+    this.shake = Math.max(0, this.shake - dt * 2.6);
+    this.nearT = Math.max(0, this.nearT - dt);
+    this.nearText = Math.max(0, this.nearText - dt);
+    this.nearCool = Math.max(0, this.nearCool - dt);
+    this.pop = Math.max(0, this.pop - dt * 3.2);
+    this.dkPop = Math.max(0, this.dkPop - dt * 2.6);
+    this.dkHurt = Math.max(0, this.dkHurt - dt * 1.7);
+    this.familyT = Math.max(0, this.familyT - dt);
+    this.camPush = Math.max(0, this.camPush - dt * 3.2);
+    this.recordT = Math.max(0, this.recordT - dt * 1.4);
+    this.peepCool = Math.max(0, this.peepCool - dt);
+
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.update(dt);
+      if (p.dead) this.particles.splice(i, 1);
+    }
+    for (let i = this.knocked.length - 1; i >= 0; i--) {
+      const k = this.knocked[i];
+      k.update(dt);
+      k.puff -= dt;
+      if (k.puff <= 0) {
+        k.puff = 0.09;
+        this.particles.push(new Particle(k.x, k.y, rand(-25, 25), rand(-20, 30),
+          rand(0.3, 0.5), rand(1.1, 1.9), Math.random() < 0.7 ? C.duck : C.duckWing, 'feather'));
+      }
+      if (k.dead) this.knocked.splice(i, 1);
+    }
+    for (let i = this.popups.length - 1; i >= 0; i--) {
+      const p = this.popups[i];
+      p.t += dt;
+      p.y -= 17 * dt;
+      if (p.t >= p.life) this.popups.splice(i, 1);
+    }
+
+    const wanted = this.knobActive ? clamp(this.knobVal, -1, 1) : this.duck.railPos;
+    this.knobShown += (wanted - this.knobShown) * Math.min(1, 26 * dt);
+    knob.style.transform = 'translateX(' + (this.knobShown * KNOB_TRAVEL).toFixed(2) + 'px)';
+
+    if (this.freeze > 0) { this.freeze -= dt; return; }
+
+    if (this.state === 'title') {
+      this.world.update(dt, this.cam);
+      this.duck.waddle(dt, false);
+      this.overlay += (1 - this.overlay) * Math.min(1, 9 * dt);
+      return;
+    }
+
+    if (this.state === 'crash' || this.state === 'over') {
+      this.deadT += dt;
+      this.world.update(dt, this.cam);
+      const d = this.duck;
+      d.angle += d.spin * dt;
+      d.spin *= (1 - Math.min(0.9, 2.4 * dt));
+      d.x = clamp(d.x + d.vx * dt, 12, W - 12);
+      d.y += d.knockY * dt;
+      d.vx *= (1 - Math.min(0.9, 3.2 * dt));
+      d.knockY *= (1 - Math.min(0.9, 3.2 * dt));
+      this.updateDucklings(dt, false, false);
+      if (this.state === 'crash' && this.deadT > 0.26) this.state = 'over';
+      if (this.state === 'over') {
+        this.overlay += (1 - this.overlay) * Math.min(1, 8 * dt);
+        if (this.overlay > 0.985) this.overlay = 1;
+      }
+      return;
+    }
+
+    /* ----- playing ----- */
+    this.runTime += dt;
+    const d = this.duck;
+    d.move(dt, this.command());
+    const fwd = Math.min(FWD_MAX, FWD_BASE + this.score * 0.5);
+    d.y -= fwd * dt;
+    d.waddle(dt, true);
+
+    const target = d.y - H * CAM_ANCHOR;
+    this.cam += (target - this.cam) * Math.min(1, 7 * dt);
+    if (this.cam > target) this.cam = target;
+
+    this.world.ensure(this.cam, this.ducklings.length);
+    this.world.update(dt, this.cam);
+
+    const kind = this.world.kindAt(d.y);
+    if (kind !== this.lastKind) {
+      if (kind === 'road') {
+        for (let i = 0; i < 6; i++) {
+          this.particles.push(new Particle(
+            d.x + rand(-6, 6), d.y + 8,
+            rand(-40, 40), rand(10, 55), rand(0.28, 0.5), rand(1.6, 3), C.grassLit, 'dust'));
+        }
+      }
+      this.lastKind = kind;
+    }
+
+    for (const s of this.world.sections) {
+      if (s.kind === 'road' && !s.scored && d.y < s.top) {
+        s.scored = true;
+        this.score++;
+        this.pop = 1;
+        this.camPush = 1;
+        if (!this.beatBest && this.best > 0 && this.score > this.best) {
+          this.beatBest = true;
+          this.recordT = 1;
+          Sfx.record();
+        } else {
+          Sfx.cross();
+        }
+        if (this.ducklings.length > 0 && Math.random() < 0.34) {
+          this.familyT = FAMILY_DUR;
+          for (let i = 0; i < this.ducklings.length; i++) this.ducklings[i].hopWait = 0.05 + i * 0.07;
+        }
+      }
+    }
+
+    this.updateDucklings(dt, true, true);
+    this.updateWaiting(dt);
+    this.collisions();
+  }
+
+  updateWaiting(dt) {
+    const d = this.duck;
+    for (const s of this.world.sections) {
+      const dk = s.duckling;
+      if (!dk) continue;
+      dk.phase += dt * 2.6;
+      dk.hopWait -= dt;
+      if (dk.hopWait <= 0) { dk.hop = 1; dk.hopWait = rand(1.3, 2.6); }
+      dk.hop = Math.max(0, dk.hop - dt * 3.4);
+      const look = clamp((d.x - dk.x) * 0.006, -0.28, 0.28);
+      dk.tilt += (look - dk.tilt) * Math.min(1, 6 * dt);
+
+      const sy = dk.y - this.cam;
+      if (!dk.greeted && sy > 0 && sy < H - 20) {
+        dk.greeted = true;
+        dk.hop = 1;
+        this.particles.push(new Particle(dk.x, dk.y - 10, 0, 0, 0.45, 5, 'rgba(255,236,150,0.9)', 'ring'));
+        Sfx.peep();
+      }
+
+      if (Math.abs(dk.x - d.x) < 24 && Math.abs(dk.y - d.y) < 26 &&
+          this.ducklings.length < MAX_DUCKLINGS) {
+        s.duckling = null;
+        const baby = new Duckling(dk.x, dk.y);
+        this.ducklings.push(baby);
+        baby.slot = this.ducklings.length;
+        this.rescued++;
+        this.dkPop = 1;
+        Sfx.chick();
+        for (let i = 0; i < 8; i++) {
+          this.particles.push(new Particle(
+            dk.x, dk.y, rand(-70, 70), rand(-70, 70), rand(0.3, 0.55), rand(1.4, 2.4),
+            pick(['#ffe9a0','#ffd233','#ffffff']), 'dust'));
+        }
+        this.particles.push(new Particle(dk.x, dk.y, 0, 0, 0.4, 8, 'rgba(255,225,120,0.95)', 'ring'));
+        this.popups.push({ x: dk.x, y: dk.y - 14, kind: 'plusduck', t: 0, life: 0.55 });
+      }
+    }
+  }
+
+  /* Ducklings hold a loose FLOCK behind the mother rather than replaying her
+     exact path - path replay is what made the line snake around like a worm.
+     Each one chases its own slot at its own eagerness, so the group swings and
+     bunches naturally. They still sit behind her, so they reach each lane later. */
+  updateDucklings(dt, moving, follow) {
+    const count = this.ducklings.length;
+    const hug = this.familyT > 0 ? Math.sin((1 - this.familyT / FAMILY_DUR) * Math.PI) : 0;
+
+    const tail = count ? this.ducklings[count - 1] : null;
+    const onRoad = this.world.kindAt(this.duck.y) === 'road' ||
+                   this.world.kindAt(this.duck.y - 14) === 'road' ||
+                   (tail && this.world.kindAt(tail.y) === 'road');
+    this.formation += ((onRoad ? 1 : 0) - this.formation) * Math.min(1, 5.5 * dt);
+
+    const cols = count <= 1 ? 1 : (count <= 4 ? 2 : 3);
+    const rowGap = lerp(ROW_GAP_GRASS, ROW_GAP_ROAD, this.formation) * (1 - 0.22 * hug);
+    const colGap = lerp(COL_GAP_GRASS, COL_GAP_ROAD, this.formation) * (1 - 0.15 * hug);
+
+    for (let i = 0; i < count; i++) {
+      const dk = this.ducklings[i];
+      dk.slot += ((i + 1) - dk.slot) * Math.min(1, DK_SLOT_K * dt);
+
+      if (follow) {
+        const idx = dk.slot - 1;
+        const row = Math.floor(idx / cols) + 1;
+        const colIdx = idx - (row - 1) * cols;
+        const colOff = cols === 1 ? 0 : (colIdx - (cols - 1) / 2) * colGap;
+        const wob = Math.sin(this.time * 2.2 + dk.wob) * 1.8;
+        const tx = clamp(this.duck.x + colOff + wob, EDGE - 4, W - EDGE + 4);
+        const ty = this.duck.y + row * rowGap;
+        const px = dk.x;
+        const k = 1 - Math.exp(-dk.follow * dt);
+        dk.x += (tx - dk.x) * k;
+        dk.y += (ty - dk.y) * Math.min(1, k * 1.5);
+        const drift = dt > 0 ? (dk.x - px) / dt : 0;
+        dk.tilt += ((clamp(drift / 240, -1, 1) * 0.26) - dk.tilt) * Math.min(1, 12 * dt);
+      }
+
+      dk.phase += dt * (moving ? dk.bobRate : 2.2);
+      if (dk.hopWait >= 0) {
+        dk.hopWait -= dt;
+        if (dk.hopWait <= 0) { dk.hop = 1; dk.hopWait = -1; }
+      }
+      dk.hop = Math.max(0, dk.hop - dt * 3.2);
+      dk.dangerT = Math.max(0, dk.dangerT - dt);
+      dk.dangerCd = Math.max(0, dk.dangerCd - dt);
+    }
+  }
+
+  collisions() {
+    const d = this.duck;
+    const dhw = d.hw, dhh = d.hh;
+    for (const s of this.world.sections) {
+      if (s.kind !== 'road') continue;
+      if (d.y < s.top - 40 || d.y > s.bottom + 40) continue;
+      for (const ln of s.lanes) {
+        const dyGap = Math.abs(ln.cy - d.y) - (14 + dhh);
+        if (dyGap > 16) continue;
+        for (const v of ln.vehicles) {
+          const gy = Math.abs(ln.cy - d.y) - (v.h / 2 - 1 + dhh);
+          const gx = Math.abs(v.x - d.x) - (v.w / 2 - 1 + dhw);
+          if (gx < 0 && gy < 0) { this.kill(v); return; }
+          if (!v.near && gy < 3 && gx >= 0 && gx < 12 && this.nearCool <= 0) {
+            v.near = true;
+            this.nearCool = 0.55;
+            this.nearT = 0.3;
+            this.nearText = 0.85;
+            Sfx.near();
+          }
+        }
+      }
+    }
+    this.babyCollisions();
+  }
+
+  babyCollisions() {
+    for (let i = this.ducklings.length - 1; i >= 0; i--) {
+      const dk = this.ducklings[i];
+      let hitBy = null;
+      for (const s of this.world.sections) {
+        if (s.kind !== 'road') continue;
+        if (dk.y < s.top - 36 || dk.y > s.bottom + 36) continue;
+        for (const ln of s.lanes) {
+          if (Math.abs(ln.cy - dk.y) > 26) continue;
+          for (const v of ln.vehicles) {
+            const gy = Math.abs(ln.cy - dk.y) - (v.h * BABY_CAR_H / 2 + DK_HH);
+            const gx = Math.abs(v.x - dk.x) - (v.w * BABY_CAR_W / 2 + DK_HW);
+            if (gx < 0 && gy < 0) { hitBy = v; break; }
+            if (dk.dangerCd <= 0 && dk.lastScare !== v.id && gy < 3 && gx >= 0 && gx < 10) {
+              dk.lastScare = v.id;
+              dk.dangerCd = 1.1;
+              dk.dangerT = 0.55;
+              dk.hop = 1;
+              if (this.peepCool <= 0) {
+                this.peepCool = 0.4;
+                Sfx.peep();
+                Sfx.whoosh(0.02);
+              }
+            }
+          }
+          if (hitBy) break;
+        }
+        if (hitBy) break;
+      }
+      if (hitBy) this.loseDuckling(i, hitBy);
+    }
+  }
+
+  loseDuckling(i, v) {
+    const dk = this.ducklings[i];
+    this.ducklings.splice(i, 1);
+    this.lost++;
+    this.dkHurt = 1;
+    this.freeze = Math.max(this.freeze, 0.04);
+    this.shake = Math.max(this.shake, 0.42);
+    const dir = v ? v.dir : 1;
+    this.knocked.push(new KnockedDuckling(dk.x, dk.y, dir));
+    const n = randInt(4, 7);
+    for (let f = 0; f < n; f++) {
+      const a = rand(0, TAU), sp = rand(40, 130);
+      this.particles.push(new Particle(dk.x, dk.y,
+        Math.cos(a) * sp + dir * 45, Math.sin(a) * sp,
+        rand(0.4, 0.8), rand(1.3, 2.4), Math.random() < 0.7 ? C.duck : C.duckWing, 'feather'));
+    }
+    let labelled = false;
+    for (const p of this.popups) {
+      if (p.kind === 'text' && p.t < 0.3 && Math.abs(p.x - dk.x) < 40) { labelled = true; break; }
+    }
+    if (!labelled) {
+      this.popups.push({ x: dk.x, y: dk.y - 13, kind: 'text',
+        text: Math.random() < 0.5 ? 'bonk!' : 'oh no!', t: 0, life: 0.62 });
+    }
+    Sfx.babyHit();
+  }
+
+  kill(v) {
+    this.state = 'crash';
+    this.deadT = 0;
+    this.freeze = 0.08;
+    this.shake = 1;
+    const d = this.duck;
+    const hitDir = v ? v.dir : 1;
+    d.spin = hitDir * rand(9, 13);
+    d.vx = hitDir * rand(90, 150);
+    d.knockY = rand(-20, 30);
+    Sfx.crash();
+    this.particles.push(new Particle(d.x, d.y, 0, 0, 0.45, 10, 'rgba(255,255,255,0.9)', 'ring'));
+    for (let i = 0; i < 12; i++) {
+      const a = rand(0, TAU), sp = rand(50, 180);
+      this.particles.push(new Particle(
+        d.x, d.y, Math.cos(a) * sp, Math.sin(a) * sp,
+        rand(0.5, 0.95), rand(1.6, 3), Math.random() < 0.7 ? C.duck : C.duckWing, 'feather'));
+    }
+    if (this.score > this.best) {
+      this.best = this.score;
+      this.newBest = true;
+      try { localStorage.setItem(BEST_KEY, String(this.best)); } catch (e) {}
+    }
+    if (!this.sent) { this.sent = true; Board.submit(this.score, this.runTime); }
+  }
+
+  /* ---------- draw ---------- */
+  draw() {
+    ctx.setTransform(viewScaleX, 0, 0, viewScaleY, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = C.grass;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    if (this.shake > 0) {
+      const m = this.shake * this.shake * 7;
+      ctx.translate(rand(-m, m), rand(-m, m));
+    }
+
+    const cam = this.cam - Math.sin(this.camPush * Math.PI) * 2.2;
+    for (const s of this.world.sections) drawSection(s, cam);
+
+    for (const s of this.world.sections) {
+      if (s.kind !== 'road') continue;
+      if (s.bottom - cam < -40 || s.top - cam > H + 40) continue;
+      for (const ln of s.lanes) {
+        const sy = ln.cy - cam;
+        if (sy < -40 || sy > H + 40) continue;
+        for (const v of ln.vehicles) drawVehicle(v, sy);
+      }
+    }
+
+    // babies still waiting in the grass
+    for (const s of this.world.sections) {
+      const dk = s.duckling;
+      if (!dk) continue;
+      const y = dk.y - cam;
+      if (y < -30 || y > H + 30) continue;
+      const hop = Math.sin(dk.hop * Math.PI) * 5;
+      ctx.save();
+      ctx.globalAlpha = 0.4 + 0.3 * Math.sin(this.time * 4 + dk.phase);
+      ctx.strokeStyle = '#fff6c4'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(dk.x, y, 15, 0, TAU); ctx.stroke();
+      ctx.restore();
+      drawDuck(dk.x, y - hop, dk.tilt, dk.phase, 0.6, 1);
+    }
+
+    // the flock, back of the group first
+    for (let i = this.ducklings.length - 1; i >= 0; i--) {
+      const dk = this.ducklings[i];
+      const y = dk.y - cam;
+      if (y < -30 || y > H + 30) continue;
+      drawDuck(dk.x, y - Math.sin(dk.hop * Math.PI) * 4, dk.tilt, dk.phase, DK_SCALE, 1);
+    }
+    // "!" needs its own pass or the next duckling covers it
+    const shouted = [];
+    for (let i = 0; i < this.ducklings.length; i++) {
+      const dk = this.ducklings[i];
+      if (dk.dangerT <= 0) continue;
+      const y = dk.y - cam;
+      if (y < -30 || y > H + 30) continue;
+      let crowded = false;
+      for (const s of shouted) {
+        if (Math.abs(s.x - dk.x) < 16 && Math.abs(s.y - y) < 22) { crowded = true; break; }
+      }
+      if (crowded) continue;
+      shouted.push({ x: dk.x, y: y });
+      const side = dk.x > W - 40 ? -13 : 13;
+      drawBang(dk.x + side, y - 5 - Math.sin(dk.hop * Math.PI) * 4, dk.dangerT / 0.55);
+    }
+
+    for (const k of this.knocked) {
+      const y = k.y - cam;
+      if (y < -40 || y > H + 40) continue;
+      drawDuck(k.x, y, k.angle, k.phase, DK_SCALE, k.alpha);
+    }
+
+    for (const p of this.particles) if (p.kind === 'dust') drawParticle(p, cam);
+
+    const d = this.duck;
+    drawDuck(d.x, d.y - cam, d.angle + (this.state === 'playing' || this.state === 'title' ? d.tilt : 0),
+             d.phase, 1, 1);
+
+    for (const p of this.particles) if (p.kind !== 'dust') drawParticle(p, cam);
+
+    // floating labels
+    for (const p of this.popups) {
+      const y = p.y - cam;
+      if (y < -20 || y > H + 20) continue;
+      const a = Math.min(1, (1 - p.t / p.life) * 2.4);
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textBaseline = 'middle';
+      if (p.kind === 'text') {
+        setFont(13);
+        ctx.fillStyle = C.accent;
+        textLS(p.text, p.x, y, 0.8, 'center', 4, 'rgba(255,255,255,0.95)');
+        ctx.fillStyle = C.accent;
+        textLS(p.text, p.x, y, 0.8, 'center', 0, '');
+      } else {
+        setFont(14);
+        ctx.fillStyle = C.ink;
+        textLS('+', p.x - 8, y, 0, 'center', 4, 'rgba(255,255,255,0.95)');
+        ctx.fillStyle = C.ink;
+        textLS('+', p.x - 8, y, 0, 'center', 0, '');
+        ctx.restore();
+        drawDuck(p.x + 5, y, 0, this.time * 5, 0.44, a);
+        continue;
+      }
+      ctx.restore();
+    }
+
+    if (this.nearText > 0 && this.state === 'playing') {
+      const k = this.nearText / 0.85;
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, k * 1.6);
+      setFont(13);
+      ctx.textBaseline = 'middle';
+      const yy = d.y - cam - 26 - (1 - k) * 14;
+      ctx.fillStyle = C.accent;
+      textLS('close!', d.x, yy, 1, 'center', 4, 'rgba(255,255,255,0.95)');
+      ctx.fillStyle = C.accent;
+      textLS('close!', d.x, yy, 1, 'center', 0, '');
+      ctx.restore();
+    }
+    ctx.restore();
+
+    if (this.nearT > 0) {
+      ctx.save();
+      ctx.globalAlpha = (this.nearT / 0.3) * 0.5;
+      ctx.strokeStyle = '#fff3d2'; ctx.lineWidth = 6;
+      ctx.strokeRect(3, 3, W - 6, H - 6);
+      ctx.restore();
+    }
+
+    this.drawHud();
+    this.drawOverlays();
+  }
+
+  drawHud() {
+    const sc = 1 + this.pop * 0.4;
+    const oneAway = this.state === 'playing' && this.best > 0 &&
+                    !this.beatBest && this.score === this.best - 1;
+    ctx.save();
+    ctx.translate(W / 2, 40);
+    ctx.scale(sc, sc);
+    setFont(36);
+    ctx.textBaseline = 'middle';
+    if (oneAway) {
+      ctx.save();
+      ctx.globalAlpha = 0.30 + 0.30 * Math.sin(this.time * 5);
+      ctx.fillStyle = C.gold;
+      textLS(this.score, 0, 0, 1, 'center', 12, 'rgba(255,190,70,0.95)');
+      ctx.restore();
+    }
+    ctx.fillStyle = C.ink;
+    textLS(this.score, 0, 0, 1, 'center', 7, 'rgba(255,255,255,0.9)');
+    ctx.fillStyle = oneAway ? '#a35410' : C.ink;
+    textLS(this.score, 0, 0, 1, 'center', 0, '');
+    ctx.restore();
+
+    if (this.recordT > 0) {
+      const k = 1 - this.recordT;
+      ctx.save();
+      ctx.globalAlpha = (1 - k) * 0.9;
+      ctx.strokeStyle = C.gold; ctx.lineWidth = 2.5 * (1 - k) + 0.5;
+      ctx.beginPath(); ctx.arc(W / 2, 40, 20 + k * 26, 0, TAU); ctx.stroke();
+      ctx.fillStyle = C.gold;
+      for (let i = 0; i < 6; i++) {
+        const a = i * TAU / 6 + k * 0.7;
+        const r = 16 + k * 30;
+        dot(W / 2 + Math.cos(a) * r, 40 + Math.sin(a) * r, 2.6 * (1 - k));
+      }
+      ctx.restore();
+    }
+
+    const n = this.ducklings.length;
+    if (this.dkHurt > 0) {
+      ctx.save();
+      ctx.globalAlpha = this.dkHurt * 0.65;
+      ctx.strokeStyle = C.accent; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(24, 26, 12 + (1 - this.dkHurt) * 8, 0, TAU); ctx.stroke();
+      ctx.restore();
+    }
+    if (n > 0) {
+      const bs = 1 + this.dkPop * 0.45 - this.dkHurt * 0.18;
+      ctx.save();
+      ctx.translate(24, 26); ctx.scale(bs, bs); ctx.translate(-24, -26);
+      drawDuck(24, 26, 0, this.time * 3, 0.5, 0.95);
+      setFont(13);
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = C.ink;
+      textLS('x' + n, 38, 27, 0.5, 'left', 4, 'rgba(255,255,255,0.9)');
+      ctx.fillStyle = this.dkHurt > 0.4 ? C.accent : C.ink;
+      textLS('x' + n, 38, 27, 0.5, 'left', 0, '');
+      ctx.restore();
+    }
+
+    drawSpeaker(W - 22, 24, Sfx.muted);
+  }
+
+  drawOverlays() {
+    if (this.state === 'title' && this.overlay > 0.01) {
+      const a = this.overlay;
+      ctx.save();
+      ctx.globalAlpha = a * 0.38;
+      ctx.fillStyle = '#fffaf0';
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      const dy = this.duck.y - this.cam;
+      const pulse = 4 + Math.sin(this.time * 3.4) * 4;
+      drawChevron(this.duck.x - 30 - pulse, dy, -1, 8, a * 0.6);
+      drawChevron(this.duck.x + 30 + pulse, dy,  1, 8, a * 0.6);
+
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.textBaseline = 'middle';
+      setFont(17);
+      ctx.fillStyle = C.ink;
+      textLS('DRAG TO STEER', W / 2, dy + 74, 3, 'center', 6, 'rgba(255,255,255,0.9)');
+      ctx.fillStyle = C.ink;
+      textLS('DRAG TO STEER', W / 2, dy + 74, 3, 'center', 0, '');
+      setFont(11, 400);
+      ctx.fillStyle = '#55605c';
+      textLS('keys, slider or finger', W / 2, dy + 96, 1, 'center', 4, 'rgba(255,255,255,0.85)');
+      ctx.fillStyle = '#55605c';
+      textLS('keys, slider or finger', W / 2, dy + 96, 1, 'center', 0, '');
+      ctx.restore();
+    }
+
+    if (this.state === 'over' && this.overlay > 0.01) {
+      const a = this.overlay;
+      ctx.save();
+      ctx.globalAlpha = a * 0.5;
+      ctx.fillStyle = '#2b3440';
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+
+      const showFamily = this.rescued > 0;
+      const showBoard = Board.on && Board.top && Board.top.length;
+      const bw = 280;
+      const bh = 168 + (showFamily ? 24 : 0) + (showBoard ? 22 + Board.top.length * 15 : 0);
+      const bx = (W - bw) / 2, by = H / 2 - bh / 2 - 6 + (1 - a) * 14;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.fillStyle = 'rgba(20,26,34,0.28)';
+      rr(bx + 4, by + 6, bw, bh, 14); ctx.fill();
+      ctx.fillStyle = C.paper;
+      ctx.strokeStyle = C.ink; ctx.lineWidth = 3;
+      rr(bx, by, bw, bh, 14); ctx.fill(); ctx.stroke();
+      // colourful banner across the top of the card
+      ctx.save();
+      rr(bx, by, bw, bh, 14); ctx.clip();
+      ctx.fillStyle = C.accent;
+      ctx.fillRect(bx, by, bw, 40);
+      ctx.restore();
+      rr(bx, by, bw, bh, 14); ctx.stroke();
+
+      ctx.textBaseline = 'middle';
+      let y = by + 21;
+      setFont(20);
+      ctx.fillStyle = '#fff';
+      textLS('DUCK DOWN!', W / 2, y, 2, 'center', 0, '');
+
+      y += 44;
+      setFont(26);
+      ctx.fillStyle = C.ink;
+      textLS(this.score + (this.score === 1 ? ' road' : ' roads'), W / 2, y, 1, 'center', 0, '');
+
+      y += 30;
+      setFont(12);
+      ctx.fillStyle = this.newBest ? C.accent : '#7d8478';
+      textLS(this.newBest ? 'NEW BEST ' + this.best : 'BEST ' + this.best, W / 2, y, 2.5, 'center', 0, '');
+
+      if (showFamily) {
+        y += 24;
+        const safe = this.ducklings.length;
+        const txt = this.lost > 0 ? (safe + ' safe \u00B7 ' + this.lost + ' lost') : (safe + ' safe');
+        setFont(12);
+        const tw = textWidth(txt, 0.5);
+        const startX = W / 2 - (tw + 17) / 2;
+        drawDuck(startX + 6, y, 0, this.time * 3, 0.5, 1);
+        ctx.fillStyle = this.lost > 0 ? '#a2704f' : '#7d8478';
+        textLS(txt, startX + 17, y + 1, 0.5, 'left', 0, '');
+      }
+
+      if (showBoard) {
+        y += 24;
+        setFont(11);
+        ctx.fillStyle = C.blue;
+        textLS('WORLD TOP', W / 2, y, 2, 'center', 0, '');
+        y += 15;
+        setFont(11);
+        for (let i = 0; i < Board.top.length; i++) {
+          const e = Board.top[i];
+          ctx.fillStyle = '#6c7468';
+          textLS((i + 1) + '. ' + String(e.name || '').slice(0, 10), bx + 16, y, 0.4, 'left', 0, '');
+          ctx.fillStyle = C.ink;
+          textLS(e.score, bx + bw - 16, y, 0.4, 'right', 0, '');
+          y += 15;
+        }
+        if (Board.rank) {
+          ctx.fillStyle = C.accent;
+          textLS('you #' + Board.rank, W / 2, y, 0.5, 'center', 0, '');
+        }
+      }
+
+      y = by + bh - 20;
+      ctx.globalAlpha = a * (0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.time * 3.6)));
+      setFont(12, 400);
+      ctx.fillStyle = '#6c7468';
+      textLS('tap to try again', W / 2, y, 1.5, 'center', 0, '');
+      ctx.restore();
+    }
+  }
+}
+
+/* ============================================================
+   INPUT
+   ============================================================ */
+const game = new Game();
+
+function canvasX(clientX) {
+  const r = cv.getBoundingClientRect();
+  return (clientX - r.left) * (W / r.width);
+}
+function canvasY(clientY) {
+  const r = cv.getBoundingClientRect();
+  return (clientY - r.top) * (H / r.height);
+}
+function firstTouch() {
+  Sfx.init();
+  if (game.state === 'title') game.start();
+}
+
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  Sfx.init();
+  const x = canvasX(e.clientX), y = canvasY(e.clientY);
+  if (x > W - 40 && y < 42) { Sfx.muted = !Sfx.muted; return; }
+  if (game.canRestart) { game.restart(); return; }
+  if (game.state === 'crash') return;
+  firstTouch();
+  game.dragActive = true;
+  game.dragX = x;
+  game.dragGrab = clamp(game.duck.x - x, -70, 70);
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+}, { passive: false });
+
+cv.addEventListener('pointermove', e => {
+  if (!game.dragActive) return;
+  e.preventDefault();
+  game.dragX = canvasX(e.clientX);
+}, { passive: false });
+
+function endDrag() { game.dragActive = false; }
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+cv.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') endDrag(); });
+
+stage.addEventListener('pointerdown', e => {
+  if (e.target === cv || track.contains(e.target) || e.target.id === 'nameIn') return;
+  Sfx.init();
+  if (game.canRestart) game.restart();
+});
+
+function knobFromClient(clientX) {
+  const r = track.getBoundingClientRect();
+  const rel = (clientX - r.left) / r.width * 2 - 1;
+  return clamp(rel * 1.18, -1, 1);
+}
+track.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  Sfx.init();
+  if (game.canRestart) { game.restart(); return; }
+  if (game.state === 'crash') return;
+  firstTouch();
+  game.knobActive = true;
+  game.knobVal = knobFromClient(e.clientX);
+  try { track.setPointerCapture(e.pointerId); } catch (err) {}
+}, { passive: false });
+track.addEventListener('pointermove', e => {
+  if (!game.knobActive) return;
+  e.preventDefault();
+  game.knobVal = knobFromClient(e.clientX);
+}, { passive: false });
+function endKnob() { game.knobActive = false; }
+track.addEventListener('pointerup', endKnob);
+track.addEventListener('pointercancel', endKnob);
+
+window.addEventListener('keydown', e => {
+  if (document.activeElement && document.activeElement.id === 'nameIn') return;
+  const k = e.key;
+  const isLeft  = k === 'ArrowLeft'  || k === 'a' || k === 'A';
+  const isRight = k === 'ArrowRight' || k === 'd' || k === 'D';
+  const isGo    = k === ' ' || k === 'Spacebar' || k === 'Enter';
+  if (isLeft || isRight || isGo || k === 'ArrowUp' || k === 'ArrowDown') e.preventDefault();
+  if (k === 'm' || k === 'M') { Sfx.init(); Sfx.muted = !Sfx.muted; return; }
+  if (isLeft || isRight || isGo) {
+    Sfx.init();
+    if (game.canRestart) { game.restart(); return; }
+    if (isLeft || isRight) firstTouch();
+  }
+  if (isLeft)  game.keys.left = true;
+  if (isRight) game.keys.right = true;
+}, { passive: false });
+
+window.addEventListener('keyup', e => {
+  const k = e.key;
+  if (k === 'ArrowLeft'  || k === 'a' || k === 'A') game.keys.left = false;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') game.keys.right = false;
+});
+
+window.addEventListener('blur', () => { game.keys.left = game.keys.right = false; endDrag(); endKnob(); });
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('touchmove', e => {
+  if (e.target && e.target.id === 'nameIn') return;
+  e.preventDefault();
+}, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault());
+
+/* name box, only when a world board is switched on */
+(function setupName() {
+  if (!Board.on) return;
+  const wrap = document.getElementById('nameWrap');
+  const input = document.getElementById('nameIn');
+  let saved = '';
+  try { saved = localStorage.getItem(NAME_KEY) || ''; } catch (e) {}
+  if (!saved) saved = 'DUCK' + Math.floor(Math.random() * 9000 + 1000);
+  Board.name = saved;
+  input.value = saved;
+  wrap.style.display = 'flex';
+  input.addEventListener('input', () => {
+    const v = input.value.replace(/[^A-Za-z0-9_ ]/g, '').slice(0, 12);
+    input.value = v;
+    Board.name = v || 'DUCK';
+    try { localStorage.setItem(NAME_KEY, Board.name); } catch (e) {}
+  });
+  Board.load();
+})();
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+let last = 0;
+document.addEventListener('visibilitychange', () => { last = 0; });
+
+function frame(now) {
+  if (!last) last = now;
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+  if (dt > 0) game.update(dt);
+  game.draw();
+  requestAnimationFrame(frame);
+}
+
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
+
