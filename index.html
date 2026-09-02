@@ -34,7 +34,6 @@
   }
   .head h1{
     margin:0;font-size:20px;font-weight:700;letter-spacing:2px;color:#fff;
-    /* one solid colour, with a dark outline so it reads off the sky */
     text-shadow:-2px 0 #16394f,2px 0 #16394f,0 -2px #16394f,0 2px #16394f,
                 -2px -2px #16394f,2px -2px #16394f,-2px 2px #16394f,3px 3px 0 rgba(22,57,79,.4);
   }
@@ -65,7 +64,6 @@
     width:15px;height:5px;margin:-2.5px 0 0 -7.5px;
     background:#ffd233;border-radius:3px;
   }
-  /* name box - only shown once a world leaderboard is switched on */
   #nameWrap{position:absolute;left:9px;top:7px;display:none;align-items:center;}
   #nameIn{
     width:120px;padding:2px 5px;
@@ -95,12 +93,32 @@
 'use strict';
 
 /* ============================================================
-   WORLD LEADERBOARD
-   Leave empty and the game is fully offline: local best score only,
-   no network, no name box. Paste your deployed worker URL here to
-   switch on world scores (see LEADERBOARD.md).
+   WORLD LEADERBOARD (optional)
+   Leave empty and the game is fully offline. See LEADERBOARD.md.
    ============================================================ */
-const LEADERBOARD_URL = '';        // e.g. 'https://duckthecar.<you>.workers.dev'
+const LEADERBOARD_URL = '';
+
+/* ============================================================
+   BALANCE - every tunable number lives here
+   ============================================================ */
+const BAL = {
+  // rewards
+  featherPerRoad:    1,
+  featherPerRescue:  5,
+  featherPerNear:    1,
+  comboBonus:       [0, 0, 2, 4, 7],   // extra feathers at combo 1,2,3,4,5+
+  missionReward:    40,
+  achievementReward: 25,
+  // near miss
+  nearGap:        12,      // px of clearance that still counts as "close"
+  nearCooldown:   0.55,    // one shout at a time, however many cars
+  comboWindow:    2.4,     // seconds to keep a combo alive
+  // emergency vehicle event
+  ambulanceFrom:   8,      // roads generated before one can appear
+  ambulanceChance: 0.14,   // per road
+  ambulanceSpeed:  188,
+  sirenLead:       1.15    // seconds of siren before it enters the screen
+};
 
 /* ============================================================
    CONSTANTS
@@ -130,7 +148,8 @@ const GEN_AHEAD  = 340;
 const CULL_BELOW = 150;
 const ACT_UP = 430, ACT_DOWN = 130;
 const KNOB_TRAVEL = 122;
-const BEST_KEY = 'duckTheCar.best';
+const SAVE_KEY = 'duckTheCar.v1';
+const OLD_BEST_KEY = 'duckTheCar.best';
 const NAME_KEY = 'duckTheCar.name';
 const TAU = Math.PI * 2;
 
@@ -140,20 +159,66 @@ const C = {
   dash:'#fdf8e7',  centre:'#ffd83d',
   duck:'#ffd233',  duckWing:'#f0a41f', beak:'#ff8b2a', foot:'#ff8b2a',
   line:'#4a3a10',  shade:'rgba(40,44,30,0.18)', carShade:'rgba(38,42,28,0.22)',
-  ink:'#2b3440',   paper:'#fffaf0', accent:'#ff5a4d', gold:'#ffc93c', blue:'#4a8fe0'
+  ink:'#2b3440',   paper:'#fffaf0', accent:'#ff5a4d', gold:'#ffc93c', blue:'#4a8fe0',
+  mute:'#7d8478'
 };
-/* the traffic is where most of the colour lives now */
 const CAR_COLORS = ['#e8564a','#4a8fe0','#58bb56','#9a6ad6','#f0902a',
                     '#f5f2e6','#3fbfae','#e05a9a','#f5d13b','#ff7a5c'];
 const FLOWERS = ['#ffffff','#ffe14d','#ff7fb0','#b98cff','#ff9b3d','#7fe6ff'];
-/* one font for the whole game, so it only has to change in one place */
 const FONT = 'Verdana, Geneva, "DejaVu Sans", Tahoma, sans-serif';
 const TYPES = {
-  car:   {w:42, h:24},
-  sedan: {w:54, h:25},
-  van:   {w:68, h:27},
-  truck: {w:92, h:28}
+  car:       {w:42, h:24},
+  sedan:     {w:54, h:25},
+  van:       {w:68, h:27},
+  truck:     {w:92, h:28},
+  ambulance: {w:64, h:27}
 };
+
+/* ============================================================
+   CONTENT - ducks, missions, achievements, death lines
+   ============================================================ */
+const DUCKS = [
+  { id:'classic', name:'CLASSIC', cost:0 },
+  { id:'cap',     name:'CAP',     cost:150 },
+  { id:'shades',  name:'SHADES',  cost:350 },
+  { id:'chef',    name:'CHEF',    cost:600 },
+  { id:'crown',   name:'KING',    cost:1000 },
+  { id:'ninja',   name:'NINJA',   cost:1500 },
+  { id:'pirate',  name:'PIRATE',  need:'parent10', needText:'Rescue 10 ducklings' },
+  { id:'danger',  name:'DANGER',  need:'danger5',  needText:'5 near misses in a run' },
+  { id:'ghost',   name:'GHOST',   need:'road50',   needText:'Reach 50 roads' }
+];
+
+const MISSION_POOL = [
+  { id:'s30',  text:'Reach 30 roads',        goal:30, kind:'runScore' },
+  { id:'s60',  text:'Reach 60 roads',        goal:60, kind:'runScore' },
+  { id:'r2',   text:'Rescue 2 in one run',   goal:2,  kind:'runRescued' },
+  { id:'r3',   text:'Rescue 3 in one run',   goal:3,  kind:'runRescued' },
+  { id:'n4',   text:'4 near misses in a run',goal:4,  kind:'runNear' },
+  { id:'n7',   text:'7 near misses in a run',goal:7,  kind:'runNear' },
+  { id:'c3',   text:'Hit a x3 close combo',  goal:3,  kind:'runCombo' },
+  { id:'t45',  text:'Survive 45 seconds',    goal:45, kind:'runTime' },
+  { id:'tr150',text:'Cross 150 roads total', goal:150,kind:'totalRoads' },
+  { id:'tf10', text:'Rescue 10 ducklings',   goal:10, kind:'totalRescued' },
+  { id:'pb',   text:'Beat your best score',  goal:1,  kind:'beatBest' }
+];
+
+const ACHIEVEMENTS = [
+  { id:'first10',  text:'Reach 10 roads',            check:(s)   => s.best >= 10 },
+  { id:'road50',   text:'Reach 50 roads',            check:(s)   => s.best >= 50 },
+  { id:'road150',  text:'Reach 150 roads',           check:(s)   => s.best >= 150 },
+  { id:'parent10', text:'Rescue 10 ducklings',       check:(s)   => s.totalRescued >= 10 },
+  { id:'family50', text:'Rescue 50 ducklings',       check:(s)   => s.totalRescued >= 50 },
+  { id:'danger5',  text:'5 near misses in one run',  check:(s,r) => r.nearMiss >= 5 },
+  { id:'maniac10', text:'10 near misses in one run', check:(s,r) => r.nearMiss >= 10 },
+  { id:'soclose',  text:'Die one road from your best', check:(s,r) => r.soClose }
+];
+
+const DEATH_LINES = [
+  'LOOK BOTH WAYS.', 'ROAD WINS.', 'HONK HONK.', 'THE CAR HAD PRIORITY.',
+  'OOPS.', 'ALMOST.', 'NOT YOUR BEST IDEA.', 'DUCK 0 - CAR 1.',
+  'MAYBE DONT DO THAT.', 'THAT WAS AVOIDABLE.'
+];
 
 /* ============================================================
    SMALL HELPERS
@@ -164,6 +229,82 @@ const lerp  = (a,b,t) => a + (b-a) * t;
 const rand  = (a,b) => a + Math.random() * (b-a);
 const randInt = (a,b) => Math.floor(rand(a, b+1));
 const pick  = arr => arr[(Math.random()*arr.length)|0];
+const num   = (v, d) => Number.isFinite(+v) ? +v : d;
+
+/* ============================================================
+   SAVE - one object, never lets a bad value stop the game
+   ============================================================ */
+const Save = {
+  data: null,
+  defaults() {
+    return {
+      best: 0, feathers: 0, runs: 0,
+      totalRoads: 0, totalRescued: 0, totalLost: 0, totalNear: 0, bestCombo: 0,
+      unlocked: ['classic'], equipped: 'classic',
+      missions: [], achievements: [],
+      sound: true, haptics: true
+    };
+  },
+  load() {
+    const d = this.defaults();
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p === 'object') for (const k in d) if (p[k] !== undefined && p[k] !== null) d[k] = p[k];
+      } else {
+        const old = parseInt(localStorage.getItem(OLD_BEST_KEY) || '0', 10);
+        if (old > 0) d.best = old;                 // migrate the old best-only save
+      }
+    } catch (e) { /* corrupt or blocked storage: defaults keep it playable */ }
+
+    // sanity pass - a broken field must never break the game
+    d.best = Math.max(0, Math.floor(num(d.best, 0)));
+    d.feathers = Math.max(0, Math.floor(num(d.feathers, 0)));
+    d.runs = Math.max(0, Math.floor(num(d.runs, 0)));
+    d.totalRoads = Math.max(0, Math.floor(num(d.totalRoads, 0)));
+    d.totalRescued = Math.max(0, Math.floor(num(d.totalRescued, 0)));
+    d.totalLost = Math.max(0, Math.floor(num(d.totalLost, 0)));
+    d.totalNear = Math.max(0, Math.floor(num(d.totalNear, 0)));
+    d.bestCombo = Math.max(0, Math.floor(num(d.bestCombo, 0)));
+    if (!Array.isArray(d.unlocked)) d.unlocked = ['classic'];
+    d.unlocked = d.unlocked.filter(id => DUCKS.some(x => x.id === id));
+    if (d.unlocked.indexOf('classic') < 0) d.unlocked.push('classic');
+    if (!DUCKS.some(x => x.id === d.equipped) || d.unlocked.indexOf(d.equipped) < 0) d.equipped = 'classic';
+    if (!Array.isArray(d.achievements)) d.achievements = [];
+    d.achievements = d.achievements.filter(id => ACHIEVEMENTS.some(a => a.id === id));
+    if (!Array.isArray(d.missions)) d.missions = [];
+    d.missions = d.missions
+      .filter(m => m && MISSION_POOL.some(p => p.id === m.id))
+      .map(m => ({ id: m.id, prog: Math.max(0, Math.floor(num(m.prog, 0))) }));
+    this.data = d;
+    this.refillMissions();
+    return d;
+  },
+  write() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(this.data)); } catch (e) {} },
+  refillMissions() {
+    const d = this.data;
+    let guard = 0;
+    while (d.missions.length < 3 && guard++ < 30) {
+      const open = MISSION_POOL.filter(p => !d.missions.some(m => m.id === p.id));
+      if (!open.length) break;
+      d.missions.push({ id: pick(open).id, prog: 0 });
+    }
+  },
+  missionDef(id) { return MISSION_POOL.find(p => p.id === id); },
+  has(id) { return this.data.unlocked.indexOf(id) >= 0; }
+};
+Save.load();
+
+/* ============================================================
+   HAPTICS - tiny, optional, silently absent where unsupported
+   ============================================================ */
+const Haptics = {
+  buzz(ms) {
+    if (!Save.data.haptics) return;
+    try { if (navigator && navigator.vibrate) navigator.vibrate(ms); } catch (e) {}
+  }
+};
 
 /* ============================================================
    CANVAS
@@ -204,7 +345,6 @@ function rr(x, y, w, h, r) {
 function dot(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
 function setFont(px, weight) { ctx.font = (weight || 700) + ' ' + px + 'px ' + FONT; }
 
-/* letter-spaced text, drawn per character so it works everywhere */
 function textLS(txt, x, y, ls, align, strokeW, strokeCol) {
   txt = String(txt);
   let total = 0;
@@ -234,7 +374,9 @@ function textWidth(txt, ls) {
    AUDIO
    ============================================================ */
 const Sfx = {
-  ac: null, master: null, muted: false,
+  ac: null, master: null,
+  get muted() { return !Save.data.sound; },
+  set muted(v) { Save.data.sound = !v; Save.write(); },
   init() {
     if (this.ac) { if (this.ac.state === 'suspended') this.ac.resume(); return; }
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -281,7 +423,8 @@ const Sfx = {
   cross()   { this.tone(620, 660, 0.09, 'sine', 0.05, 0);
               this.tone(930, 990, 0.11, 'sine', 0.045, 0.06); },
   whoosh(v) { this.noise(0.16, v || 0.028, 2000, 240); },
-  near()    { this.whoosh(0.05); this.tone(350, 235, 0.09, 'triangle', 0.02, 0); },
+  near(n)   { this.whoosh(0.05);
+              this.tone(330 + n * 90, 230 + n * 70, 0.09, 'triangle', 0.022, 0); },
   peep()    { this.tone(1480, 1720, 0.045, 'triangle', 0.017, 0); },
   chick()   { this.tone(720, 760, 0.06, 'triangle', 0.05, 0);
               this.tone(960, 1000, 0.06, 'triangle', 0.05, 0.055);
@@ -293,7 +436,20 @@ const Sfx = {
               this.tone(150, 52, 0.28, 'square', 0.07, 0); },
   record()  { this.tone(760, 800, 0.09, 'triangle', 0.05, 0);
               this.tone(1010, 1060, 0.09, 'triangle', 0.05, 0.07);
-              this.tone(1520, 1590, 0.17, 'triangle', 0.045, 0.14); }
+              this.tone(1520, 1590, 0.17, 'triangle', 0.045, 0.14); },
+  /* two-tone siren, played while the ambulance is still off screen */
+  siren()   { for (let i = 0; i < 3; i++) {
+                this.tone(740, 740, 0.16, 'square', 0.026, i * 0.34);
+                this.tone(560, 560, 0.16, 'square', 0.026, i * 0.34 + 0.17);
+              } },
+  mission() { this.tone(880, 920, 0.07, 'triangle', 0.045, 0);
+              this.tone(1320, 1380, 0.12, 'triangle', 0.04, 0.07); },
+  coin()    { this.tone(1180, 1240, 0.05, 'triangle', 0.03, 0); },
+  unlock()  { this.noise(0.07, 0.05, 2200, 600);
+              this.tone(520, 560, 0.08, 'triangle', 0.05, 0.05);
+              this.tone(780, 820, 0.08, 'triangle', 0.05, 0.13);
+              this.tone(1170, 1230, 0.20, 'triangle', 0.05, 0.21); },
+  quack()   { this.tone(420, 300, 0.13, 'sawtooth', 0.035, 0); }
 };
 
 /* ============================================================
@@ -307,6 +463,7 @@ class Vehicle {
     this.x = x; this.dir = dir; this.color = color;
     this.id = ++vehSeq;
     this.near = false;
+    this.emergency = (type === 'ambulance');
   }
 }
 
@@ -322,6 +479,7 @@ class Lane {
       ? clamp((speed - d.speedMin) / (d.speedMax - d.speedMin), 0, 1) : 0.5;
     this.sparse = sparse ? 1.75 : 1;
     this.vehicles = [];
+    this.emergencyPending = false;   // set by the world when an ambulance is due
     this.nextGap = this.rollGap();
     this.prefill();
   }
@@ -340,6 +498,7 @@ class Lane {
     return Math.random() < 0.5 ? 'car' : 'sedan';
   }
   colorFor(type) {
+    if (type === 'ambulance') return '#f7f4ea';
     if (type === 'truck') return Math.random() < 0.6 ? '#f5f2e6' : '#f5d13b';
     return pick(CAR_COLORS);
   }
@@ -356,7 +515,7 @@ class Lane {
     }
     this.nextGap = this.rollGap();
   }
-  trySpawn() {
+  trySpawn(game) {
     let gapAvail;
     if (this.vehicles.length === 0) gapAvail = Infinity;
     else if (this.dir > 0) {
@@ -369,21 +528,36 @@ class Lane {
       gapAvail = (W - maxR) + 10;
     }
     if (gapAvail < this.nextGap) return;
+
+    // an ambulance starts far enough off screen that the siren lands first
+    if (this.emergencyPending) {
+      this.emergencyPending = false;
+      const t = TYPES.ambulance;
+      const lead = BAL.sirenLead * BAL.ambulanceSpeed;
+      const x = this.dir > 0 ? -t.w/2 - 10 - lead : W + t.w/2 + 10 + lead;
+      const v = new Vehicle('ambulance', x, this.dir, this.colorFor('ambulance'));
+      this.vehicles.push(v);
+      this.nextGap = this.rollGap() * 1.4;
+      if (game) game.onSiren(this);
+      return;
+    }
+
     const type = this.makeType();
     const t = TYPES[type];
     const x = this.dir > 0 ? -t.w/2 - 10 : W + t.w/2 + 10;
     this.vehicles.push(new Vehicle(type, x, this.dir, this.colorFor(type)));
     this.nextGap = this.rollGap();
   }
-  update(dt) {
+  update(dt, game) {
     const vs = this.vehicles;
     for (let i = vs.length - 1; i >= 0; i--) {
       const v = vs[i];
-      v.x += this.speed * this.dir * dt;
+      const sp = v.emergency ? BAL.ambulanceSpeed : this.speed;
+      v.x += sp * this.dir * dt;
       const gone = this.dir > 0 ? (v.x - v.w/2 > W + 70) : (v.x + v.w/2 < -70);
       if (gone) vs.splice(i, 1);
     }
-    this.trySpawn();
+    this.trySpawn(game);
   }
 }
 
@@ -472,6 +646,9 @@ class Duck {
     this.angle = 0;
     this.spin = 0;
     this.knockY = 0;
+    this.startle = 0;      // eyes widen briefly on a close pass
+    this.cheer = 0;        // tiny happy pose after a rescue
+    this.idle = 0;         // how long the player has not steered
   }
   get hw() { return DUCK_W * HITBOX / 2; }
   get hh() { return DUCK_H * HITBOX / 2; }
@@ -488,11 +665,14 @@ class Duck {
     this.x = clamp(this.x, EDGE, W - EDGE);
     this.vx = dt > 0 ? (this.x - prev) / dt : 0;
     this.tilt += ((this.vx / SNAP_SPEED) * 0.30 - this.tilt) * Math.min(1, 16 * dt);
+    this.idle = Math.abs(this.vx) > 6 ? 0 : this.idle + dt;
   }
   get railPos() { return (this.x - W / 2) / (W / 2 - EDGE); }
   waddle(dt, moving) {
     const rate = moving ? (5.2 + Math.abs(this.vx) / 70) : 2.4;
     this.phase += dt * rate;
+    this.startle = Math.max(0, this.startle - dt * 1.6);
+    this.cheer = Math.max(0, this.cheer - dt * 1.4);
   }
 }
 
@@ -528,7 +708,7 @@ class World {
   }
 
   decorate(sec) {
-    const n = Math.round(sec.h / 9);          // plenty of colour in the grass
+    const n = Math.round(sec.h / 9);
     for (let i = 0; i < n; i++) {
       const r = Math.random();
       sec.details.push({
@@ -572,6 +752,10 @@ class World {
         sec.lanes.push(new Lane(sec.top + i * LANE_H, dir, speed, d, !!sparse[i]));
         dir = Math.random() < 0.78 ? -dir : dir;
       }
+      // rare emergency run, announced by its siren before it enters
+      if (this.roadsMade >= BAL.ambulanceFrom && Math.random() < BAL.ambulanceChance) {
+        pick(sec.lanes).emergencyPending = true;
+      }
       this.roadsMade++;
     }
     this.sections.push(sec);
@@ -585,12 +769,12 @@ class World {
     while (this.sections.length > 1 && this.sections[0].top > cam + H + CULL_BELOW) this.sections.shift();
   }
 
-  update(dt, cam) {
+  update(dt, cam, game) {
     const lo = cam - ACT_UP, hi = cam + H + ACT_DOWN;
     for (const s of this.sections) {
       if (s.kind !== 'road') continue;
       if (s.bottom < lo || s.top > hi) continue;
-      for (const ln of s.lanes) ln.update(dt);
+      for (const ln of s.lanes) ln.update(dt, game);
     }
   }
 
@@ -642,7 +826,6 @@ function drawSection(s, cam) {
     ctx.fillStyle = C.edge;
     ctx.fillRect(0, y - 1, W, 2);
     ctx.fillRect(0, y + s.h - 1, W, 2);
-    // yellow between opposing streams, white dashes between same-way lanes
     for (let i = 1; i < s.lanes.length; i++) {
       const ly = y + i * LANE_H - 1.5;
       if (ly < -6 || ly > H + 6) continue;
@@ -657,7 +840,7 @@ function drawSection(s, cam) {
   }
 }
 
-function drawVehicle(v, sy) {
+function drawVehicle(v, sy, time) {
   const w = v.w, h = v.h, hw = w/2, hh = h/2;
   if (v.x + hw < -70 || v.x - hw > W + 70) return;
   ctx.save();
@@ -686,6 +869,21 @@ function drawVehicle(v, sy) {
     rr(hw - 26, -hh + 3, 16, h - 6, 3); ctx.fill();
     ctx.fillStyle = 'rgba(196,236,250,0.95)';
     rr(hw - 11, -hh + 4.5, 5, h - 9, 2); ctx.fill();
+  } else if (v.type === 'ambulance') {
+    ctx.fillStyle = '#f7f4ea';
+    rr(-hw + 2, -hh + 2, w - 22, h - 4, 4); ctx.fill();
+    ctx.fillStyle = C.accent;                        // red side stripe
+    ctx.fillRect(-hw + 3, -3, w - 24, 6);
+    ctx.fillStyle = 'rgba(0,0,0,0.10)';
+    rr(hw - 20, -hh + 3, 12, h - 6, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(196,236,250,0.95)';
+    rr(hw - 9, -hh + 4.5, 5, h - 9, 2); ctx.fill();
+    // flashing bar on the roof
+    const on = Math.floor(time * 8) % 2 === 0;
+    ctx.fillStyle = on ? '#ff3b30' : '#3b6bff';
+    rr(-6, -hh + 4, 5, h - 8, 2); ctx.fill();
+    ctx.fillStyle = on ? '#3b6bff' : '#ff3b30';
+    rr(1, -hh + 4, 5, h - 8, 2); ctx.fill();
   } else {
     const roofIn = v.type === 'van' ? 10 : 13;
     ctx.fillStyle = 'rgba(0,0,0,0.13)';
@@ -703,10 +901,67 @@ function drawVehicle(v, sy) {
   ctx.restore();
 }
 
-function drawDuck(x, y, angle, phase, scale, alpha) {
+/* cosmetic hats, drawn in the duck's own space after the head */
+function drawSkin(id, step, t) {
+  switch (id) {
+    case 'cap':
+      ctx.fillStyle = '#e8564a'; ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(0, -9.5, 6.2, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#c2453b';
+      rr(-7.5, -10.4, 15, 2.6, 1.2); ctx.fill(); ctx.stroke();
+      break;
+    case 'shades':
+      ctx.fillStyle = '#22252b'; ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+      rr(-6.4, -9.4, 12.8, 4.2, 1.6); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.35)';
+      rr(-5.4, -8.9, 3.4, 1.4, 0.7); ctx.fill();
+      break;
+    case 'chef':
+      ctx.fillStyle = '#fdfaf2'; ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+      rr(-5.2, -12.4, 10.4, 3.4, 1.2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(0, -14.6, 6.2, 3.6, 0, 0, TAU); ctx.fill(); ctx.stroke();
+      break;
+    case 'crown':
+      ctx.fillStyle = C.gold; ctx.strokeStyle = C.line; ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(-6, -9.6); ctx.lineTo(-6, -14.4); ctx.lineTo(-3, -11.8);
+      ctx.lineTo(0, -15.2); ctx.lineTo(3, -11.8); ctx.lineTo(6, -14.4);
+      ctx.lineTo(6, -9.6); ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    case 'ninja':
+      ctx.fillStyle = '#2f3640'; ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+      rr(-6.6, -9.8, 13.2, 4, 1.4); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#2f3640';
+      ctx.beginPath(); ctx.moveTo(6, -8.6); ctx.lineTo(12.5, -6.5); ctx.lineTo(6, -5.6);
+      ctx.closePath(); ctx.fill();
+      break;
+    case 'pirate':
+      ctx.fillStyle = '#33383f'; ctx.strokeStyle = C.line; ctx.lineWidth = 1.1;
+      ctx.beginPath(); ctx.arc(0, -9.6, 6.3, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#f2efe3'; dot(-2.4, -11.2, 1); dot(2.4, -11.2, 1);
+      ctx.fillStyle = '#22252b';
+      rr(-6.4, -8.6, 5, 3, 1.2); ctx.fill();
+      break;
+    case 'danger':
+      ctx.fillStyle = '#ff8b2a'; ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.arc(0, -9.4, 6.4, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#fff2c8';
+      ctx.beginPath();
+      ctx.moveTo(1.4, -15.6); ctx.lineTo(-2.6, -10.6); ctx.lineTo(0.2, -10.6);
+      ctx.lineTo(-1.2, -6.6); ctx.lineTo(3.2, -12); ctx.lineTo(0.4, -12);
+      ctx.closePath(); ctx.fill();
+      break;
+    case 'ghost':
+      // handled as a whole-duck tint, nothing to draw on top
+      break;
+  }
+}
+
+function drawDuck(x, y, angle, phase, scale, alpha, skin, startle) {
   const s = scale || 1;
+  const ghost = skin === 'ghost';
   ctx.save();
-  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ctx.globalAlpha = (alpha === undefined ? 1 : alpha) * (ghost ? 0.62 : 1);
   ctx.translate(x, y);
   ctx.fillStyle = C.shade;
   ctx.beginPath(); ctx.ellipse(0, 8 * s, 10.5 * s, 4 * s, 0, 0, TAU); ctx.fill();
@@ -728,25 +983,42 @@ function drawDuck(x, y, angle, phase, scale, alpha) {
 
   ctx.translate(0, bob);
 
-  ctx.fillStyle = C.duck;
+  const body = ghost ? '#e8f4ff' : C.duck;
+  const wing = ghost ? '#c6dcef' : C.duckWing;
+  ctx.fillStyle = body;
   ctx.beginPath(); ctx.ellipse(0, 1.5, 9.6, 9, 0, 0, TAU); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = C.duckWing;
+  ctx.fillStyle = wing;
   ctx.beginPath(); ctx.ellipse(-7.6, 1.8, 3.4, 6, -0.26 + step * 0.14, 0, TAU); ctx.fill(); ctx.stroke();
   ctx.beginPath(); ctx.ellipse( 7.6, 1.8, 3.4, 6,  0.26 - step * 0.14, 0, TAU); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = C.duckWing;
+  ctx.fillStyle = wing;
   ctx.beginPath(); ctx.ellipse(0, 9.6, 2.6, 1.7, 0, 0, TAU); ctx.fill(); ctx.stroke();
-  ctx.fillStyle = C.duck;
+  ctx.fillStyle = body;
   ctx.beginPath(); ctx.arc(0, -6.8, 6.3, 0, TAU); ctx.fill(); ctx.stroke();
-  // wide flat bill so it reads as a duck, not a pointy hat
   ctx.fillStyle = C.beak;
   ctx.beginPath();
   ctx.moveTo(-3.8, -12.2);
   ctx.quadraticCurveTo(-4.1, -16.2, 0, -16.2);
   ctx.quadraticCurveTo(4.1, -16.2, 3.8, -12.2);
   ctx.closePath(); ctx.fill(); ctx.stroke();
+  // eyes widen for a moment after a close pass
+  const eye = 1.3 + (startle || 0) * 0.9;
   ctx.fillStyle = '#2b2b2b';
-  dot(-3.4, -7.6, 1.3);
-  dot( 3.4, -7.6, 1.3);
+  dot(-3.4, -7.6, eye);
+  dot( 3.4, -7.6, eye);
+  if (skin && skin !== 'classic') drawSkin(skin, step, phase);
+  ctx.restore();
+}
+
+function drawFeather(x, y, s, color) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-0.5);
+  ctx.fillStyle = color || '#e9f2f7';
+  ctx.strokeStyle = 'rgba(60,70,80,0.5)';
+  ctx.lineWidth = 0.9;
+  ctx.beginPath(); ctx.ellipse(0, 0, 2.1 * s, 4.4 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(60,70,80,0.45)';
+  ctx.beginPath(); ctx.moveTo(0, -4.2 * s); ctx.lineTo(0, 4.6 * s); ctx.stroke();
   ctx.restore();
 }
 
@@ -773,7 +1045,6 @@ function drawParticle(p, cam) {
   ctx.restore();
 }
 
-/* the tiny "!" a baby throws when a car sweeps past it */
 function drawBang(x, y, k) {
   const pop = 1 + (1 - Math.min(1, k * 1.4)) * 0.5;
   ctx.save();
@@ -819,6 +1090,20 @@ function drawChevron(x, y, dir, size, alpha) {
   ctx.restore();
 }
 
+/* small pill button used by the menus */
+function drawButton(b, label, fill, textCol) {
+  ctx.fillStyle = 'rgba(20,26,34,0.22)';
+  rr(b.x + 2, b.y + 3, b.w, b.h, 8); ctx.fill();
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = C.ink; ctx.lineWidth = 2.5;
+  rr(b.x, b.y, b.w, b.h, 8); ctx.fill(); ctx.stroke();
+  setFont(Math.min(14, b.h * 0.42));
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = textCol || '#fff';
+  textLS(label, b.x + b.w / 2, b.y + b.h / 2 + 1, 1.2, 'center', 0, '');
+}
+function inBox(b, x, y) { return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+
 /* ============================================================
    WORLD LEADERBOARD CLIENT
    ============================================================ */
@@ -856,19 +1141,20 @@ const Board = {
    ============================================================ */
 class Game {
   constructor() {
-    this.best = 0;
-    try { this.best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10) || 0; } catch (e) {}
     this.state = 'title';
+    this.menu = { sel: null, reveal: 0, revealId: null, from: 'title' };
     this.reset(true);
     this.keys = { left: false, right: false };
     this.dragActive = false; this.dragX = 0; this.dragGrab = 0;
     this.knobActive = false; this.knobVal = 0; this.knobShown = 0;
   }
 
+  get best() { return Save.data.best; }
+  set best(v) { Save.data.best = Math.max(0, Math.floor(num(v, 0))); }
+
   reset(firstTime) {
     this.score = 0;
     this.time = 0;
-    this.runTime = 0;
     this.duck = new Duck(W / 2, 0);
     this.cam = this.duck.y - H * CAM_ANCHOR;
     this.world = new World(this.duck.y);
@@ -876,9 +1162,15 @@ class Game {
     this.ducklings = [];
     this.knocked = [];
     this.popups = [];
-    this.rescued = 0;
-    this.lost = 0;
     this.particles = [];
+    // everything earned this run, banked exactly once on death
+    this.run = { time: 0, rescued: 0, lost: 0, nearMiss: 0, bestCombo: 0,
+                 nearFeathers: 0, beatBest: false, soClose: false };
+    this.banked = false;
+    this.runFeathers = 0;
+    this.doneMissions = [];
+    this.doneAch = [];
+    this.deathLine = '';
     this.shake = 0;
     this.freeze = 0;
     this.deadT = 0;
@@ -886,7 +1178,10 @@ class Game {
     this.pop = 0;
     this.nearT = 0;
     this.nearText = 0;
+    this.nearLabel = '';
     this.nearCool = 0;
+    this.combo = 0;
+    this.comboT = 0;
     this.dkPop = 0;
     this.dkHurt = 0;
     this.peepCool = 0;
@@ -898,6 +1193,11 @@ class Game {
     this.lastKind = 'grass';
     this.newBest = false;
     this.sent = false;
+    this.toast = 0;
+    this.toastText = '';
+    this.sirenT = 0;
+    this.sirenSide = 1;
+    this.quackT = 0;
   }
 
   start() {
@@ -919,6 +1219,17 @@ class Game {
     return { mode: 'none' };
   }
 
+  say(text) { this.toastText = text; this.toast = 1.6; }
+
+  onSiren(lane) {
+    // only shout about it if the player can actually see that road
+    const sy = lane.cy - this.cam;
+    if (sy < -60 || sy > H + 60) return;
+    Sfx.siren();
+    this.sirenT = BAL.sirenLead;
+    this.sirenSide = lane.dir;
+  }
+
   /* ---------- update ---------- */
   update(dt) {
     this.time += dt;
@@ -926,6 +1237,8 @@ class Game {
     this.nearT = Math.max(0, this.nearT - dt);
     this.nearText = Math.max(0, this.nearText - dt);
     this.nearCool = Math.max(0, this.nearCool - dt);
+    this.comboT = Math.max(0, this.comboT - dt);
+    if (this.comboT <= 0) this.combo = 0;
     this.pop = Math.max(0, this.pop - dt * 3.2);
     this.dkPop = Math.max(0, this.dkPop - dt * 2.6);
     this.dkHurt = Math.max(0, this.dkHurt - dt * 1.7);
@@ -933,6 +1246,10 @@ class Game {
     this.camPush = Math.max(0, this.camPush - dt * 3.2);
     this.recordT = Math.max(0, this.recordT - dt * 1.4);
     this.peepCool = Math.max(0, this.peepCool - dt);
+    this.toast = Math.max(0, this.toast - dt);
+    this.sirenT = Math.max(0, this.sirenT - dt);
+    this.quackT = Math.max(0, this.quackT - dt);
+    this.menu.reveal = Math.max(0, this.menu.reveal - dt);
 
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
@@ -961,10 +1278,11 @@ class Game {
     this.knobShown += (wanted - this.knobShown) * Math.min(1, 26 * dt);
     knob.style.transform = 'translateX(' + (this.knobShown * KNOB_TRAVEL).toFixed(2) + 'px)';
 
+    if (this.state === 'ducks') return;
     if (this.freeze > 0) { this.freeze -= dt; return; }
 
     if (this.state === 'title') {
-      this.world.update(dt, this.cam);
+      this.world.update(dt, this.cam, this);
       this.duck.waddle(dt, false);
       this.overlay += (1 - this.overlay) * Math.min(1, 9 * dt);
       return;
@@ -972,7 +1290,7 @@ class Game {
 
     if (this.state === 'crash' || this.state === 'over') {
       this.deadT += dt;
-      this.world.update(dt, this.cam);
+      this.world.update(dt, this.cam, this);
       const d = this.duck;
       d.angle += d.spin * dt;
       d.spin *= (1 - Math.min(0.9, 2.4 * dt));
@@ -990,19 +1308,22 @@ class Game {
     }
 
     /* ----- playing ----- */
-    this.runTime += dt;
+    this.run.time += dt;
     const d = this.duck;
     d.move(dt, this.command());
     const fwd = Math.min(FWD_MAX, FWD_BASE + this.score * 0.5);
     d.y -= fwd * dt;
     d.waddle(dt, true);
 
+    // idle duck gets impatient and quacks about it
+    if (d.idle > 6 && this.quackT <= 0) { this.quackT = 5; Sfx.quack(); }
+
     const target = d.y - H * CAM_ANCHOR;
     this.cam += (target - this.cam) * Math.min(1, 7 * dt);
     if (this.cam > target) this.cam = target;
 
     this.world.ensure(this.cam, this.ducklings.length);
-    this.world.update(dt, this.cam);
+    this.world.update(dt, this.cam, this);
 
     const kind = this.world.kindAt(d.y);
     if (kind !== this.lastKind) {
@@ -1025,7 +1346,9 @@ class Game {
         if (!this.beatBest && this.best > 0 && this.score > this.best) {
           this.beatBest = true;
           this.recordT = 1;
+          this.say('NEW BEST!');
           Sfx.record();
+          Haptics.buzz(24);
         } else {
           Sfx.cross();
         }
@@ -1067,9 +1390,11 @@ class Game {
         const baby = new Duckling(dk.x, dk.y);
         this.ducklings.push(baby);
         baby.slot = this.ducklings.length;
-        this.rescued++;
+        this.run.rescued++;
         this.dkPop = 1;
+        d.cheer = 1;
         Sfx.chick();
+        Haptics.buzz(12);
         for (let i = 0; i < 8; i++) {
           this.particles.push(new Particle(
             dk.x, dk.y, rand(-70, 70), rand(-70, 70), rand(0.3, 0.55), rand(1.4, 2.4),
@@ -1082,9 +1407,7 @@ class Game {
   }
 
   /* Ducklings hold a loose FLOCK behind the mother rather than replaying her
-     exact path - path replay is what made the line snake around like a worm.
-     Each one chases its own slot at its own eagerness, so the group swings and
-     bunches naturally. They still sit behind her, so they reach each lane later. */
+     exact path - path replay is what made the line snake around like a worm. */
   updateDucklings(dt, moving, follow) {
     const count = this.ducklings.length;
     const hug = this.familyT > 0 ? Math.sin((1 - this.familyT / FAMILY_DUR) * Math.PI) : 0;
@@ -1143,17 +1466,40 @@ class Game {
           const gy = Math.abs(ln.cy - d.y) - (v.h / 2 - 1 + dhh);
           const gx = Math.abs(v.x - d.x) - (v.w / 2 - 1 + dhw);
           if (gx < 0 && gy < 0) { this.kill(v); return; }
-          if (!v.near && gy < 3 && gx >= 0 && gx < 12 && this.nearCool <= 0) {
+          if (!v.near && gy < 3 && gx >= 0 && gx < BAL.nearGap && this.nearCool <= 0) {
             v.near = true;
-            this.nearCool = 0.55;
-            this.nearT = 0.3;
-            this.nearText = 0.85;
-            Sfx.near();
+            this.registerNearMiss();
           }
         }
       }
     }
     this.babyCollisions();
+  }
+
+  /* one shout at a time however many cars, and the combo only survives
+     if the next close pass lands inside the window */
+  registerNearMiss() {
+    this.nearCool = BAL.nearCooldown;
+    this.combo = (this.comboT > 0 ? this.combo : 0) + 1;
+    this.comboT = BAL.comboWindow;
+    this.run.nearMiss++;
+    this.run.bestCombo = Math.max(this.run.bestCombo, this.combo);
+    const bonus = BAL.comboBonus[Math.min(this.combo, BAL.comboBonus.length - 1)];
+    this.run.nearFeathers += BAL.featherPerNear + bonus;
+    this.nearT = 0.3;
+    this.nearText = 0.9;
+    this.nearLabel = this.combo <= 1 ? 'close!'
+                   : this.combo === 2 ? 'close x2'
+                   : this.combo === 3 ? 'danger x3'
+                   : 'crazy x' + this.combo;
+    this.duck.startle = 1;
+    this.shake = Math.max(this.shake, 0.28);
+    Sfx.near(Math.min(this.combo - 1, 3));
+    Haptics.buzz(10);
+    for (let i = 0; i < 2; i++) {
+      this.particles.push(new Particle(this.duck.x + rand(-6, 6), this.duck.y + rand(-4, 4),
+        rand(-50, 50), rand(-40, 10), rand(0.4, 0.7), rand(1.2, 2), C.duck, 'feather'));
+    }
   }
 
   babyCollisions() {
@@ -1192,7 +1538,7 @@ class Game {
   loseDuckling(i, v) {
     const dk = this.ducklings[i];
     this.ducklings.splice(i, 1);
-    this.lost++;
+    this.run.lost++;
     this.dkHurt = 1;
     this.freeze = Math.max(this.freeze, 0.04);
     this.shake = Math.max(this.shake, 0.42);
@@ -1214,6 +1560,7 @@ class Game {
         text: Math.random() < 0.5 ? 'bonk!' : 'oh no!', t: 0, life: 0.62 });
     }
     Sfx.babyHit();
+    Haptics.buzz(18);
   }
 
   kill(v) {
@@ -1227,6 +1574,7 @@ class Game {
     d.vx = hitDir * rand(90, 150);
     d.knockY = rand(-20, 30);
     Sfx.crash();
+    Haptics.buzz(45);
     this.particles.push(new Particle(d.x, d.y, 0, 0, 0.45, 10, 'rgba(255,255,255,0.9)', 'ring'));
     for (let i = 0; i < 12; i++) {
       const a = rand(0, TAU), sp = rand(50, 180);
@@ -1234,12 +1582,116 @@ class Game {
         d.x, d.y, Math.cos(a) * sp, Math.sin(a) * sp,
         rand(0.5, 0.95), rand(1.6, 3), Math.random() < 0.7 ? C.duck : C.duckWing, 'feather'));
     }
-    if (this.score > this.best) {
-      this.best = this.score;
-      this.newBest = true;
-      try { localStorage.setItem(BEST_KEY, String(this.best)); } catch (e) {}
+    this.bankRun();
+    if (!this.sent) { this.sent = true; Board.submit(this.score, this.run.time); }
+  }
+
+  /* Everything a run earned is committed here, exactly once. Nothing else
+     touches the save during a run, so no reward can be granted twice. */
+  bankRun() {
+    if (this.banked) return;
+    this.banked = true;
+    const s = Save.data, r = this.run;
+
+    r.beatBest = s.best > 0 && this.score > s.best;
+    r.soClose  = s.best > 0 && this.score === s.best - 1;
+
+    let earned = this.score * BAL.featherPerRoad
+               + r.rescued * BAL.featherPerRescue
+               + r.nearFeathers;
+
+    s.runs++;
+    s.totalRoads += this.score;
+    s.totalRescued += r.rescued;
+    s.totalLost += r.lost;
+    s.totalNear += r.nearMiss;
+    s.bestCombo = Math.max(s.bestCombo, r.bestCombo);
+    if (this.score > s.best) { s.best = this.score; this.newBest = true; }
+
+    // missions: progress, then reward and replace any that finished
+    for (let i = 0; i < s.missions.length; i++) {
+      const m = s.missions[i];
+      const def = Save.missionDef(m.id);
+      if (!def) continue;
+      const val = this.missionValue(def, r, s);
+      m.prog = def.kind.indexOf('total') === 0 ? val : Math.max(m.prog, val);
+      if (m.prog >= def.goal) {
+        earned += BAL.missionReward;
+        this.doneMissions.push(def.text);
+        s.missions[i] = null;
+      }
     }
-    if (!this.sent) { this.sent = true; Board.submit(this.score, this.runTime); }
+    s.missions = s.missions.filter(Boolean);
+    Save.refillMissions();
+
+    // achievements: each fires once, ever
+    for (const a of ACHIEVEMENTS) {
+      if (s.achievements.indexOf(a.id) >= 0) continue;
+      let hit = false;
+      try { hit = !!a.check(s, r); } catch (e) { hit = false; }
+      if (hit) {
+        s.achievements.push(a.id);
+        earned += BAL.achievementReward;
+        this.doneAch.push(a.text);
+      }
+    }
+
+    // ducks that are earned rather than bought open up as soon as their
+    // achievement lands, so the reward is never stranded behind a paywall
+    for (const dk of DUCKS) {
+      if (dk.need && s.achievements.indexOf(dk.need) >= 0 && s.unlocked.indexOf(dk.id) < 0) {
+        s.unlocked.push(dk.id);
+        this.doneAch.push('NEW DUCK: ' + dk.name);
+      }
+    }
+
+    s.feathers += earned;
+    this.runFeathers = earned;
+    this.deathLine = r.soClose ? 'SO CLOSE!'
+                   : (Math.random() < 0.65 ? pick(DEATH_LINES) : '');
+    Save.write();
+  }
+
+  missionValue(def, r, s) {
+    switch (def.kind) {
+      case 'runScore':     return this.score;
+      case 'runRescued':   return r.rescued;
+      case 'runNear':      return r.nearMiss;
+      case 'runCombo':     return r.bestCombo;
+      case 'runTime':      return Math.floor(r.time);
+      case 'totalRoads':   return s.totalRoads;
+      case 'totalRescued': return s.totalRescued;
+      case 'beatBest':     return r.beatBest ? 1 : 0;
+    }
+    return 0;
+  }
+
+  /* ---------- menu actions ---------- */
+  openDucks(from) {
+    this.state = 'ducks';
+    this.menu.from = from;
+    this.menu.sel = Save.data.equipped;
+  }
+  closeDucks() { this.state = this.menu.from === 'over' ? 'over' : 'title'; }
+  duckAction() {
+    const d = DUCKS.find(x => x.id === this.menu.sel);
+    if (!d) return;
+    if (Save.has(d.id)) {
+      Save.data.equipped = d.id;
+      Save.write();
+      Sfx.coin();
+      return;
+    }
+    if (d.need) return;                                   // achievement locked
+    if (Save.data.feathers < d.cost) return;              // cannot afford
+    Save.data.feathers -= d.cost;
+    Save.data.unlocked.push(d.id);
+    Save.data.equipped = d.id;
+    Save.write();
+    this.menu.reveal = 1.1;
+    this.menu.revealId = d.id;
+    Sfx.unlock();
+    Haptics.buzz(30);
   }
 
   /* ---------- draw ---------- */
@@ -1264,11 +1716,10 @@ class Game {
       for (const ln of s.lanes) {
         const sy = ln.cy - cam;
         if (sy < -40 || sy > H + 40) continue;
-        for (const v of ln.vehicles) drawVehicle(v, sy);
+        for (const v of ln.vehicles) drawVehicle(v, sy, this.time);
       }
     }
 
-    // babies still waiting in the grass
     for (const s of this.world.sections) {
       const dk = s.duckling;
       if (!dk) continue;
@@ -1283,14 +1734,12 @@ class Game {
       drawDuck(dk.x, y - hop, dk.tilt, dk.phase, 0.6, 1);
     }
 
-    // the flock, back of the group first
     for (let i = this.ducklings.length - 1; i >= 0; i--) {
       const dk = this.ducklings[i];
       const y = dk.y - cam;
       if (y < -30 || y > H + 30) continue;
       drawDuck(dk.x, y - Math.sin(dk.hop * Math.PI) * 4, dk.tilt, dk.phase, DK_SCALE, 1);
     }
-    // "!" needs its own pass or the next duckling covers it
     const shouted = [];
     for (let i = 0; i < this.ducklings.length; i++) {
       const dk = this.ducklings[i];
@@ -1316,12 +1765,13 @@ class Game {
     for (const p of this.particles) if (p.kind === 'dust') drawParticle(p, cam);
 
     const d = this.duck;
-    drawDuck(d.x, d.y - cam, d.angle + (this.state === 'playing' || this.state === 'title' ? d.tilt : 0),
-             d.phase, 1, 1);
+    const cheerLift = Math.sin(d.cheer * Math.PI) * 3;
+    drawDuck(d.x, d.y - cam - cheerLift,
+             d.angle + (this.state === 'playing' || this.state === 'title' ? d.tilt : 0),
+             d.phase, 1, 1, Save.data.equipped, d.startle);
 
     for (const p of this.particles) if (p.kind !== 'dust') drawParticle(p, cam);
 
-    // floating labels
     for (const p of this.popups) {
       const y = p.y - cam;
       if (y < -20 || y > H + 20) continue;
@@ -1349,16 +1799,17 @@ class Game {
     }
 
     if (this.nearText > 0 && this.state === 'playing') {
-      const k = this.nearText / 0.85;
+      const k = this.nearText / 0.9;
       ctx.save();
       ctx.globalAlpha = Math.min(1, k * 1.6);
-      setFont(13);
+      setFont(this.combo >= 3 ? 15 : 13);
       ctx.textBaseline = 'middle';
       const yy = d.y - cam - 26 - (1 - k) * 14;
-      ctx.fillStyle = C.accent;
-      textLS('close!', d.x, yy, 1, 'center', 4, 'rgba(255,255,255,0.95)');
-      ctx.fillStyle = C.accent;
-      textLS('close!', d.x, yy, 1, 'center', 0, '');
+      const col = this.combo >= 4 ? '#ff2d1f' : this.combo >= 3 ? '#ff7a1f' : C.accent;
+      ctx.fillStyle = col;
+      textLS(this.nearLabel, d.x, yy, 1, 'center', 4, 'rgba(255,255,255,0.95)');
+      ctx.fillStyle = col;
+      textLS(this.nearLabel, d.x, yy, 1, 'center', 0, '');
       ctx.restore();
     }
     ctx.restore();
@@ -1371,14 +1822,17 @@ class Game {
       ctx.restore();
     }
 
+    if (this.state === 'ducks') { this.drawDucksScreen(); return; }
+
     this.drawHud();
     this.drawOverlays();
   }
 
   drawHud() {
+    const s = Save.data;
     const sc = 1 + this.pop * 0.4;
-    const oneAway = this.state === 'playing' && this.best > 0 &&
-                    !this.beatBest && this.score === this.best - 1;
+    const oneAway = this.state === 'playing' && s.best > 0 &&
+                    !this.beatBest && this.score === s.best - 1;
     ctx.save();
     ctx.translate(W / 2, 40);
     ctx.scale(sc, sc);
@@ -1396,6 +1850,17 @@ class Game {
     ctx.fillStyle = oneAway ? '#a35410' : C.ink;
     textLS(this.score, 0, 0, 1, 'center', 0, '');
     ctx.restore();
+
+    // a quiet target to chase
+    if (s.best > 0 && this.state !== 'over') {
+      setFont(11);
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = this.beatBest ? C.gold : 'rgba(43,52,64,0.55)';
+      textLS(this.beatBest ? 'BEST ' + this.score : 'BEST ' + s.best, W / 2, 74, 1.5, 'center',
+             3, 'rgba(255,255,255,0.8)');
+      ctx.fillStyle = this.beatBest ? '#a35410' : 'rgba(43,52,64,0.55)';
+      textLS(this.beatBest ? 'BEST ' + this.score : 'BEST ' + s.best, W / 2, 74, 1.5, 'center', 0, '');
+    }
 
     if (this.recordT > 0) {
       const k = 1 - this.recordT;
@@ -1434,10 +1899,55 @@ class Game {
       ctx.restore();
     }
 
+    // siren warning arrow on the side the ambulance is coming from
+    if (this.sirenT > 0) {
+      const a = Math.min(1, this.sirenT / 0.4) * (0.55 + 0.45 * Math.sin(this.time * 14));
+      const x = this.sirenSide > 0 ? 16 : W - 16;
+      ctx.save();
+      ctx.globalAlpha = a;
+      ctx.fillStyle = Math.floor(this.time * 8) % 2 === 0 ? '#ff3b30' : '#3b6bff';
+      ctx.beginPath();
+      ctx.moveTo(x + this.sirenSide * 9, H / 2);
+      ctx.lineTo(x - this.sirenSide * 7, H / 2 - 11);
+      ctx.lineTo(x - this.sirenSide * 7, H / 2 + 11);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    if (this.toast > 0 && this.state === 'playing') {
+      const a = Math.min(1, this.toast / 0.4);
+      ctx.save();
+      ctx.globalAlpha = a;
+      setFont(13);
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = C.gold;
+      textLS(this.toastText, W / 2, 92, 1.5, 'center', 4, 'rgba(255,255,255,0.9)');
+      ctx.fillStyle = '#a35410';
+      textLS(this.toastText, W / 2, 92, 1.5, 'center', 0, '');
+      ctx.restore();
+    }
+
     drawSpeaker(W - 22, 24, Sfx.muted);
   }
 
+  /* buttons are laid out here so input and drawing can never disagree */
+  layout() {
+    return {
+      ducksBtn: { x: W / 2 - 52, y: H - 42, w: 104, h: 30 },
+      close:    { x: W - 42, y: 12, w: 30, h: 30 },
+      action:   { x: W / 2 - 70, y: 394, w: 140, h: 34 },
+      sound:    { x: 16, y: 436, w: 92, h: 26 },
+      haptic:   { x: 116, y: 436, w: 96, h: 26 }
+    };
+  }
+  duckCell(i) {
+    const col = i % 3, row = Math.floor(i / 3);
+    return { x: 18 + col * 120, y: 78 + row * 100, w: 120, h: 100 };
+  }
+
   drawOverlays() {
+    const L = this.layout();
+
     if (this.state === 'title' && this.overlay > 0.01) {
       const a = this.overlay;
       ctx.save();
@@ -1465,21 +1975,30 @@ class Game {
       ctx.fillStyle = '#55605c';
       textLS('keys, slider or finger', W / 2, dy + 96, 1, 'center', 0, '');
       ctx.restore();
+
+      ctx.save();
+      ctx.globalAlpha = a;
+      drawButton(L.ducksBtn, 'DUCKS', C.blue);
+      this.drawFeatherCount(W - 20, H - 27, 'right');
+      ctx.restore();
     }
 
     if (this.state === 'over' && this.overlay > 0.01) {
       const a = this.overlay;
+      const s = Save.data;
       ctx.save();
       ctx.globalAlpha = a * 0.5;
       ctx.fillStyle = '#2b3440';
       ctx.fillRect(0, 0, W, H);
       ctx.restore();
 
-      const showFamily = this.rescued > 0;
+      const showFamily = this.run.rescued > 0;
+      const mission = this.nextMissionLine();
       const showBoard = Board.on && Board.top && Board.top.length;
-      const bw = 280;
-      const bh = 168 + (showFamily ? 24 : 0) + (showBoard ? 22 + Board.top.length * 15 : 0);
-      const bx = (W - bw) / 2, by = H / 2 - bh / 2 - 6 + (1 - a) * 14;
+      const bw = 286;
+      const bh = 178 + (this.deathLine ? 18 : 0) + (showFamily ? 20 : 0)
+               + (mission ? 20 : 0) + (showBoard ? 20 + Board.top.length * 15 : 0);
+      const bx = (W - bw) / 2, by = clamp(H / 2 - bh / 2 - 10 + (1 - a) * 14, 8, H - bh - 46);
       ctx.save();
       ctx.globalAlpha = a;
       ctx.fillStyle = 'rgba(20,26,34,0.28)';
@@ -1487,10 +2006,9 @@ class Game {
       ctx.fillStyle = C.paper;
       ctx.strokeStyle = C.ink; ctx.lineWidth = 3;
       rr(bx, by, bw, bh, 14); ctx.fill(); ctx.stroke();
-      // colourful banner across the top of the card
       ctx.save();
       rr(bx, by, bw, bh, 14); ctx.clip();
-      ctx.fillStyle = C.accent;
+      ctx.fillStyle = this.newBest ? C.gold : C.accent;
       ctx.fillRect(bx, by, bw, 40);
       ctx.restore();
       rr(bx, by, bw, bh, 14); ctx.stroke();
@@ -1499,37 +2017,61 @@ class Game {
       let y = by + 21;
       setFont(20);
       ctx.fillStyle = '#fff';
-      textLS('DUCK DOWN!', W / 2, y, 2, 'center', 0, '');
+      textLS(this.newBest ? 'NEW BEST!' : 'DUCK DOWN!', W / 2, y, 2, 'center', 0, '');
 
-      y += 44;
-      setFont(26);
+      if (this.deathLine) {
+        y += 30;
+        setFont(11);
+        ctx.fillStyle = '#9a9384';
+        textLS(this.deathLine, W / 2, y, 1, 'center', 0, '');
+        y += 14;
+      } else { y += 30; }
+
+      y += 20;
+      setFont(30);
       ctx.fillStyle = C.ink;
       textLS(this.score + (this.score === 1 ? ' road' : ' roads'), W / 2, y, 1, 'center', 0, '');
 
-      y += 30;
+      y += 24;
       setFont(12);
-      ctx.fillStyle = this.newBest ? C.accent : '#7d8478';
-      textLS(this.newBest ? 'NEW BEST ' + this.best : 'BEST ' + this.best, W / 2, y, 2.5, 'center', 0, '');
+      ctx.fillStyle = C.mute;
+      textLS('BEST ' + s.best, W / 2, y, 2.5, 'center', 0, '');
 
       if (showFamily) {
-        y += 24;
-        const safe = this.ducklings.length;
-        const txt = this.lost > 0 ? (safe + ' safe \u00B7 ' + this.lost + ' lost') : (safe + ' safe');
+        y += 20;
+        const txt = this.run.lost > 0
+          ? (this.ducklings.length + ' safe \u00B7 ' + this.run.lost + ' lost')
+          : (this.ducklings.length + ' safe');
         setFont(12);
         const tw = textWidth(txt, 0.5);
         const startX = W / 2 - (tw + 17) / 2;
         drawDuck(startX + 6, y, 0, this.time * 3, 0.5, 1);
-        ctx.fillStyle = this.lost > 0 ? '#a2704f' : '#7d8478';
+        ctx.fillStyle = this.run.lost > 0 ? '#a2704f' : C.mute;
         textLS(txt, startX + 17, y + 1, 0.5, 'left', 0, '');
       }
 
+      // feathers earned this run
+      y += 22;
+      setFont(13);
+      const ftxt = '+' + this.runFeathers;
+      const fw = textWidth(ftxt, 0.5);
+      drawFeather(W / 2 - fw / 2 - 8, y, 1, '#dfeaf2');
+      ctx.fillStyle = C.ink;
+      textLS(ftxt, W / 2 - fw / 2 + 3, y, 0.5, 'left', 0, '');
+
+      if (mission) {
+        y += 20;
+        setFont(11);
+        ctx.fillStyle = mission.done ? '#3f9e4d' : C.mute;
+        textLS(mission.text, W / 2, y, 0.5, 'center', 0, '');
+      }
+
       if (showBoard) {
-        y += 24;
+        y += 20;
         setFont(11);
         ctx.fillStyle = C.blue;
         textLS('WORLD TOP', W / 2, y, 2, 'center', 0, '');
         y += 15;
-        setFont(11);
         for (let i = 0; i < Board.top.length; i++) {
           const e = Board.top[i];
           ctx.fillStyle = '#6c7468';
@@ -1544,11 +2086,142 @@ class Game {
         }
       }
 
-      y = by + bh - 20;
+      y = by + bh - 18;
       ctx.globalAlpha = a * (0.55 + 0.45 * (0.5 + 0.5 * Math.sin(this.time * 3.6)));
       setFont(12, 400);
-      ctx.fillStyle = '#6c7468';
+      ctx.fillStyle = C.mute;
       textLS('tap to try again', W / 2, y, 1.5, 'center', 0, '');
+      ctx.globalAlpha = a;
+
+      drawButton(L.ducksBtn, 'DUCKS', C.blue);
+      this.drawFeatherCount(W - 20, H - 27, 'right');
+      ctx.restore();
+    }
+  }
+
+  /* the single most useful mission line: the one closest to done */
+  nextMissionLine() {
+    if (this.doneMissions.length) return { text: 'MISSION DONE: ' + this.doneMissions[0], done: true };
+    const s = Save.data;
+    let best = null, bestRatio = -1;
+    for (const m of s.missions) {
+      const def = Save.missionDef(m.id);
+      if (!def) continue;
+      const ratio = clamp(m.prog / def.goal, 0, 1);
+      if (ratio > bestRatio) { bestRatio = ratio; best = { def, m }; }
+    }
+    if (!best) return null;
+    return { text: best.def.text + '  ' + Math.min(best.m.prog, best.def.goal) + '/' + best.def.goal,
+             done: false };
+  }
+
+  drawFeatherCount(x, y, align) {
+    setFont(13);
+    ctx.textBaseline = 'middle';
+    const t = String(Save.data.feathers);
+    const w = textWidth(t, 0.5);
+    const tx = align === 'right' ? x - w : x;
+    drawFeather(tx - 9, y, 1, '#dfeaf2');
+    ctx.fillStyle = C.ink;
+    textLS(t, tx, y, 0.5, 'left', 3, 'rgba(255,255,255,0.85)');
+    ctx.fillStyle = C.ink;
+    textLS(t, tx, y, 0.5, 'left', 0, '');
+  }
+
+  drawDucksScreen() {
+    const L = this.layout();
+    const s = Save.data;
+    ctx.fillStyle = 'rgba(43,52,64,0.72)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = C.paper;
+    rr(8, 8, W - 16, H - 16, 14); ctx.fill();
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 3; ctx.stroke();
+
+    ctx.textBaseline = 'middle';
+    setFont(18);
+    ctx.fillStyle = C.ink;
+    textLS('DUCKS', 22, 28, 2, 'left', 0, '');
+    this.drawFeatherCount(W - 54, 28, 'right');
+
+    // close
+    drawButton(L.close, 'X', C.accent);
+
+    for (let i = 0; i < DUCKS.length; i++) {
+      const d = DUCKS[i], cell = this.duckCell(i);
+      const owned = Save.has(d.id);
+      const equipped = s.equipped === d.id;
+      const selected = this.menu.sel === d.id;
+      ctx.fillStyle = equipped ? '#eaf7dc' : (selected ? '#f2ece0' : '#f7f2e6');
+      rr(cell.x + 4, cell.y + 4, cell.w - 8, cell.h - 8, 10); ctx.fill();
+      ctx.strokeStyle = selected ? C.ink : 'rgba(43,52,64,0.22)';
+      ctx.lineWidth = selected ? 3 : 1.5;
+      rr(cell.x + 4, cell.y + 4, cell.w - 8, cell.h - 8, 10); ctx.stroke();
+
+      const cx = cell.x + cell.w / 2, cy = cell.y + 44;
+      const reveal = this.menu.reveal > 0 && this.menu.revealId === d.id
+        ? 1 + Math.sin((1 - this.menu.reveal / 1.1) * Math.PI) * 0.5 : 1;
+      drawDuck(cx, cy, 0, this.time * 3 + i, 0.95 * reveal, owned ? 1 : 0.3, d.id);
+
+      setFont(10);
+      ctx.fillStyle = owned ? C.ink : C.mute;
+      textLS(d.name, cx, cell.y + 72, 0.6, 'center', 0, '');
+      setFont(9, 400);
+      if (equipped) {
+        ctx.fillStyle = '#3f9e4d';
+        textLS('EQUIPPED', cx, cell.y + 86, 0.4, 'center', 0, '');
+      } else if (owned) {
+        ctx.fillStyle = C.mute;
+        textLS('owned', cx, cell.y + 86, 0.4, 'center', 0, '');
+      } else if (d.need) {
+        ctx.fillStyle = C.mute;
+        textLS('locked', cx, cell.y + 86, 0.4, 'center', 0, '');
+      } else {
+        const can = s.feathers >= d.cost;
+        ctx.fillStyle = can ? C.ink : C.mute;
+        const t = String(d.cost);
+        const w = textWidth(t, 0.4);
+        drawFeather(cx - w / 2 - 6, cell.y + 86, 0.8, can ? '#dfeaf2' : '#e6e2d6');
+        textLS(t, cx - w / 2 + 3, cell.y + 86, 0.4, 'left', 0, '');
+      }
+    }
+
+    // selection detail + action
+    const sel = DUCKS.find(x => x.id === this.menu.sel);
+    if (sel) {
+      const owned = Save.has(sel.id);
+      setFont(11, 400);
+      ctx.fillStyle = C.mute;
+      const info = owned ? (s.equipped === sel.id ? 'Your current duck' : 'Tap equip to wear it')
+                 : (sel.need ? sel.needText : 'Costs ' + sel.cost + ' feathers');
+      textLS(info, W / 2, 380, 0.4, 'center', 0, '');
+
+      let label = 'EQUIP', fill = C.blue;
+      if (!owned) {
+        if (sel.need) { label = 'LOCKED'; fill = '#b9b3a4'; }
+        else if (s.feathers < sel.cost) { label = 'NEED ' + (sel.cost - s.feathers); fill = '#b9b3a4'; }
+        else { label = 'BUY'; fill = '#3f9e4d'; }
+      } else if (s.equipped === sel.id) { label = 'WEARING'; fill = '#8fbf6a'; }
+      drawButton(L.action, label, fill);
+    }
+
+    drawButton(L.sound, s.sound ? 'SOUND ON' : 'SOUND OFF', s.sound ? C.blue : '#b9b3a4');
+    drawButton(L.haptic, s.haptics ? 'BUZZ ON' : 'BUZZ OFF', s.haptics ? C.blue : '#b9b3a4');
+
+    // quiet stats footer
+    setFont(9, 400);
+    ctx.fillStyle = C.mute;
+    textLS('runs ' + s.runs + '   roads ' + s.totalRoads + '   rescued ' + s.totalRescued +
+           '   close calls ' + s.totalNear, W / 2, 480, 0.3, 'center', 0, '');
+
+    if (this.menu.reveal > 0) {
+      const k = 1 - this.menu.reveal / 1.1;
+      ctx.save();
+      ctx.globalAlpha = (1 - k) * 0.9;
+      setFont(16);
+      ctx.fillStyle = C.gold;
+      textLS('NEW DUCK!', W / 2, 60, 2, 'center', 4, C.ink);
+      ctx.fillStyle = C.gold;
+      textLS('NEW DUCK!', W / 2, 60, 2, 'center', 0, '');
       ctx.restore();
     }
   }
@@ -1572,11 +2245,39 @@ function firstTouch() {
   if (game.state === 'title') game.start();
 }
 
+function menuTap(x, y) {
+  const L = game.layout();
+  if (game.state === 'ducks') {
+    if (inBox(L.close, x, y)) { game.closeDucks(); Sfx.coin(); return true; }
+    if (inBox(L.action, x, y)) { game.duckAction(); return true; }
+    if (inBox(L.sound, x, y)) {
+      Save.data.sound = !Save.data.sound; Save.write();
+      if (Save.data.sound) Sfx.coin();
+      return true;
+    }
+    if (inBox(L.haptic, x, y)) {
+      Save.data.haptics = !Save.data.haptics; Save.write();
+      Haptics.buzz(15); return true;
+    }
+    for (let i = 0; i < DUCKS.length; i++) {
+      if (inBox(game.duckCell(i), x, y)) { game.menu.sel = DUCKS[i].id; Sfx.coin(); return true; }
+    }
+    return true;                                   // swallow taps inside the menu
+  }
+  if ((game.state === 'title' || game.canRestart) && inBox(L.ducksBtn, x, y)) {
+    Sfx.init();
+    game.openDucks(game.state === 'title' ? 'title' : 'over');
+    return true;
+  }
+  return false;
+}
+
 cv.addEventListener('pointerdown', e => {
   e.preventDefault();
   Sfx.init();
   const x = canvasX(e.clientX), y = canvasY(e.clientY);
-  if (x > W - 40 && y < 42) { Sfx.muted = !Sfx.muted; return; }
+  if (menuTap(x, y)) return;
+  if (x > W - 40 && y < 42) { Save.data.sound = !Save.data.sound; Save.write(); return; }
   if (game.canRestart) { game.restart(); return; }
   if (game.state === 'crash') return;
   firstTouch();
@@ -1611,6 +2312,7 @@ function knobFromClient(clientX) {
 track.addEventListener('pointerdown', e => {
   e.preventDefault();
   Sfx.init();
+  if (game.state === 'ducks') return;
   if (game.canRestart) { game.restart(); return; }
   if (game.state === 'crash') return;
   firstTouch();
@@ -1634,7 +2336,15 @@ window.addEventListener('keydown', e => {
   const isRight = k === 'ArrowRight' || k === 'd' || k === 'D';
   const isGo    = k === ' ' || k === 'Spacebar' || k === 'Enter';
   if (isLeft || isRight || isGo || k === 'ArrowUp' || k === 'ArrowDown') e.preventDefault();
-  if (k === 'm' || k === 'M') { Sfx.init(); Sfx.muted = !Sfx.muted; return; }
+  if (k === 'm' || k === 'M') { Sfx.init(); Save.data.sound = !Save.data.sound; Save.write(); return; }
+  if (game.state === 'ducks') {
+    if (k === 'Escape' || isGo) game.closeDucks();
+    return;
+  }
+  if (k === 'Escape' && (game.state === 'title' || game.canRestart)) {
+    game.openDucks(game.state === 'title' ? 'title' : 'over');
+    return;
+  }
   if (isLeft || isRight || isGo) {
     Sfx.init();
     if (game.canRestart) { game.restart(); return; }
@@ -1700,4 +2410,3 @@ requestAnimationFrame(frame);
 </script>
 </body>
 </html>
-
