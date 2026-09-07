@@ -7,17 +7,24 @@ drawn version, so you can do one sprite at a time.
 
 ## How to switch it on
 
-In `index.html`, find:
+It is already on. `duck.png` is in use; everything else is still drawn by code.
+
+To add a sprite: drop the PNG in this folder, then add one line to the `files`
+list in `index.html`:
 
 ```js
 const ART = {
-  enabled: false,
+  enabled: true,
+  base: 'assets/',
+  files: {
+    duck: 'duck.png',
+    car: 'car.png'        // <- the new line
+  },
 ```
 
-Change it to `enabled: true`. That is the only edit.
-
-Leave it `false` until you actually have files here, otherwise the browser
-console fills up with 404s.
+Only list files that are really here. A name in that list with no file behind it
+makes every player's browser fetch a 404 on load. Anything not listed quietly
+keeps using the drawn version, so you can go one sprite at a time.
 
 ## What to make
 

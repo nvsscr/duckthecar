@@ -816,12 +816,13 @@ class World {
    missing silently falls back, so a half-finished set is fine.
    ============================================================ */
 const ART = {
-  enabled: false,
+  enabled: true,
   base: 'assets/',
+  // Only list files that actually exist in assets/, otherwise every player's
+  // browser fetches a 404 on load. Add a line here as each sprite is drawn.
+  // Available keys: duck, duckling, feather, car, sedan, van, truck, ambulance.
   files: {
-    duck: 'duck.png', duckling: 'duckling.png', feather: 'feather.png',
-    car: 'car.png', sedan: 'sedan.png', van: 'van.png',
-    truck: 'truck.png', ambulance: 'ambulance.png'
+    duck: 'duck.png'
   },
   img: {},
   load() {
